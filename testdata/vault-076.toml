@@ -1,0 +1,57 @@
+# VT-UOS Configuration File
+# Vault-Tec Unified Operating System
+#
+# Test configuration for Vault 076
+
+[vault]
+designation = "Vault 076"
+number = 76
+region = "Appalachia"
+commissioned_date = "2076-10-23"
+sealed_date = "2077-10-23T09:47:00Z"
+designed_capacity = 500
+vault_type = "control"
+
+[vault.location]
+latitude = 39.6295
+longitude = -79.9559
+depth_meters = 100
+
+[overseer]
+initial_overseer_id = ""
+
+[experiment]
+enabled = false
+protocol_id = ""
+protocol_name = ""
+classification = "NONE"
+
+[simulation]
+enabled = true
+time_scale = 60.0
+auto_events = true
+event_frequency = "normal"
+start_date = "2077-10-23T09:47:00Z"
+
+[simulation.consumption]
+calorie_variance = 0.1
+water_variance = 0.1
+efficiency_decay_rate = 0.001
+
+[display]
+color_scheme = "green_phosphor"
+scan_lines = true
+flicker = false
+date_format = "2006-01-02"
+time_format = "15:04:05"
+
+[logging]
+level = "info"
+file = "logs/vtuos.log"
+max_size_mb = 10
+max_backups = 5
+
+[database]
+path = "vault.db"
+backup_interval_hours = 24
+backup_retention_days = 30
