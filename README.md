@@ -7,8 +7,9 @@ VT-UOS is a realistic vault population management and operations system designed
 - **Language/Runtime:** Go 1.22+, pure Go (no CGO) with SQLite via `modernc.org/sqlite` for an embedded, power-loss-resilient database.
 - **Layered layout:** `cmd/` (entrypoint) → `internal/` packages for configuration, database, models, repositories, services, simulation, and TUI presentation. Services encapsulate business rules; TUI layers never talk directly to repositories.
 - **Modules:** Population, Resources, Facilities, Medical, Security, Governance, Labor, and Simulation. Each module has models, repository accessors, and service logic, with Bubble Tea/Lip Gloss TUI views under `internal/tui/views/`.
-- **Configuration & logging:** TOML config (`vault.toml`) loaded from XDG config (`~/.config/vtuos/`) or the working directory; defaults are generated if missing. Structured logging via `log/slog` with optional file output.
-- **Migrations & backups:** SQLite migrations live in `migrations/`; database recovery and backup helpers are built into the runtime.
+- **Configuration:** TOML config (`vault.toml`) loaded from XDG config (`~/.config/vtuos/`) or the working directory; defaults are generated if missing when the app starts.
+- **Logging:** Structured logging via `log/slog` with optional file output driven by configuration.
+- **Migrations & backups:** SQLite migrations live in `internal/database/migrations/`; database recovery and backup helpers are built into the runtime.
 
 See `docs/` for deep dives: `DATABASE.md` (schema), `MODULES.md` (service specs), `TUI.md` (interface), and `CONFIGURATION.md` (all config knobs).
 
