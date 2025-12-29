@@ -5,7 +5,8 @@ VT-UOS is a realistic vault population management and operations system designed
 ## Architecture at a Glance
 
 - **Language/Runtime:** Go 1.22+, pure Go (no cgo) with SQLite via `modernc.org/sqlite` for an embedded, power-loss-resilient database.
-- **Layered layout:** `cmd/` (entrypoint) → `internal/` packages for configuration, database, models, repositories, services, simulation, and TUI presentation. Services encapsulate business rules; TUI layers never talk directly to repositories.
+- **Layered layout:** `cmd/` (entrypoint) → `internal/` packages for configuration, database, models, repositories, services, simulation, and TUI presentation.
+- **TUI boundaries:** Services encapsulate business rules; TUI layers never talk directly to repositories.
 - **Modules:** Population, Resources, Facilities, Medical, Security, Governance, Labor, and Simulation. Each module has models, repository accessors, and service logic, with Bubble Tea/Lip Gloss TUI views under `internal/tui/views/`.
 - **Configuration:** TOML config (`vault.toml`) loaded from XDG config (`~/.config/vtuos/`) or the working directory; defaults are generated if missing when the app starts.
 - **Logging:** Structured logging via `log/slog` with optional file output driven by configuration.
@@ -24,7 +25,7 @@ make build              # builds ./bin/vtuos (static)
 ./bin/vtuos --config=vault.toml # start with an explicit config
 ```
 
-If no config is provided, VT-UOS searches `~/.config/vtuos/vault.toml` then `./vault.toml`; a default file is created when absent. Key flags:
+If no config is provided, VT-UOS searches for configuration in order: 1) `~/.config/vtuos/vault.toml`, 2) `./vault.toml`. A default file is created when absent. Key flags:
 
 - `--migrate-only` — run migrations and exit
 - `--seed` — generate seed data after migrations
