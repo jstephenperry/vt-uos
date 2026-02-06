@@ -131,20 +131,18 @@ func (i *Input) Validate() bool {
 	return true
 }
 
-// Render renders the input field.
+// Render renders the input field with default label width.
 func (i *Input) Render() string {
-	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00AA00")).Width(16)
+	return i.RenderWithLabelWidth(16)
+}
+
+// RenderWithLabelWidth renders the input field with a specified label width.
+// If labelWidth is 0, the label is omitted and only the value is rendered.
+func (i *Input) RenderWithLabelWidth(labelWidth int) string {
 	valueStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00"))
 	focusStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#66FF66"))
 	errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF4444"))
 	mutedStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#006600"))
-
-	// Build label
-	label := i.label
-	if i.required {
-		label += "*"
-	}
-	label += ":"
 
 	// Build value display
 	var display string
@@ -170,6 +168,27 @@ func (i *Input) Render() string {
 	if displayLen < i.width {
 		display += strings.Repeat(" ", i.width-displayLen)
 	}
+
+	// If labelWidth is 0, render value only (used for inline fields like date parts)
+	if labelWidth == 0 {
+		result := display
+		if i.err != "" {
+			result += " " + errStyle.Render(i.err)
+		}
+		return result
+	}
+
+	if labelWidth < 8 {
+		labelWidth = 8
+	}
+	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00AA00")).Width(labelWidth)
+
+	// Build label
+	label := i.label
+	if i.required {
+		label += "*"
+	}
+	label += ":"
 
 	result := labelStyle.Render(label) + " " + display
 
@@ -246,9 +265,17 @@ func (s *Select) HandleKey(key string) {
 	}
 }
 
-// Render renders the select.
+// Render renders the select with default label width.
 func (s *Select) Render() string {
-	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00AA00")).Width(16)
+	return s.RenderWithLabelWidth(16)
+}
+
+// RenderWithLabelWidth renders the select with a specified label width.
+func (s *Select) RenderWithLabelWidth(labelWidth int) string {
+	if labelWidth < 8 {
+		labelWidth = 8
+	}
+	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00AA00")).Width(labelWidth)
 	optStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00AA00"))
 	selStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00")).Bold(true)
 
@@ -281,6 +308,7 @@ type formField interface {
 	IsFocused() bool
 	HandleKey(string)
 	Render() string
+	RenderWithLabelWidth(int) string
 }
 
 // Ensure Input and Select implement formField
@@ -295,6 +323,7 @@ type FormField interface {
 	IsFocused() bool
 	HandleKey(string)
 	Render() string
+	RenderWithLabelWidth(int) string
 }
 
 // Form is a simple form container.
@@ -384,21 +413,31 @@ func (f *Form) SetError(err string) {
 	f.err = err
 }
 
-// Render renders the form.
+// Render renders the form with default label width.
 func (f *Form) Render() string {
+	return f.RenderResponsive(0)
+}
+
+// RenderResponsive renders the form adapted to the given terminal width.
+func (f *Form) RenderResponsive(width int) string {
 	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#66FF66")).Bold(true)
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00AA00"))
 	errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF4444"))
 
+	labelWidth := 16
+	if width > 0 && width < 60 {
+		labelWidth = 10
+	}
+
 	var b strings.Builder
 
 	// Title
-	b.WriteString(titleStyle.Render(fmt.Sprintf("=== %s ===", f.title)))
+	b.WriteString(titleStyle.Render(fmt.Sprintf("═══ %s ═══", f.title)))
 	b.WriteString("\n\n")
 
 	// Fields
 	for _, field := range f.fields {
-		b.WriteString(field.Render())
+		b.WriteString(field.RenderWithLabelWidth(labelWidth))
 		b.WriteString("\n")
 	}
 
@@ -411,7 +450,11 @@ func (f *Form) Render() string {
 
 	// Help
 	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("Tab/Down:Next  Shift+Tab/Up:Prev  Ctrl+S:Save  Esc:Cancel"))
+	if width > 0 && width < 60 {
+		b.WriteString(helpStyle.Render("Tab:Next  Ctrl+S:Save  Esc:Cancel"))
+	} else {
+		b.WriteString(helpStyle.Render("Tab/Down:Next  Shift+Tab/Up:Prev  Ctrl+S:Save  Esc:Cancel"))
+	}
 
 	return b.String()
 }

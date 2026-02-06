@@ -753,7 +753,7 @@ func (a *App) getModuleContent() string {
 func (a *App) renderPopulation() string {
 	// Show form if active
 	if a.showForm && a.residentForm != nil {
-		return a.residentForm.Render()
+		return a.residentForm.RenderResponsive(a.width)
 	}
 
 	// Show detail if active
@@ -1251,6 +1251,7 @@ func (a *App) renderSecurity() string {
 		{"ZONE-F", "Reactor", 6, "RESTRICTED"},
 	}
 
+	bp := GetBreakpoint(a.width)
 	for _, zone := range zones {
 		statusStyle := a.theme.Success
 		switch zone.status {
@@ -1264,11 +1265,19 @@ func (a *App) renderSecurity() string {
 			statusStyle = a.theme.Error
 		}
 
-		b.WriteString(fmt.Sprintf("  %-8s %-18s CLR:%d  %s\n",
-			zone.code,
-			zone.name,
-			zone.clearance,
-			statusStyle.Render(zone.status)))
+		if bp == BreakpointNarrow {
+			// Compact: code + status only
+			b.WriteString(fmt.Sprintf("  %-8s CLR:%d %s\n",
+				zone.code,
+				zone.clearance,
+				statusStyle.Render(zone.status)))
+		} else {
+			b.WriteString(fmt.Sprintf("  %-8s %-18s CLR:%d  %s\n",
+				zone.code,
+				zone.name,
+				zone.clearance,
+				statusStyle.Render(zone.status)))
+		}
 	}
 
 	b.WriteString("\n")
@@ -1304,16 +1313,26 @@ func (a *App) renderGovernance() string {
 		{"OD-2077-005", "Work Assignment Policy", "DEPT_HEAD", "ACTIVE"},
 	}
 
+	bp := GetBreakpoint(a.width)
 	for _, d := range directives {
 		statusStyle := a.theme.Success
 		if d.status != "ACTIVE" {
 			statusStyle = a.theme.Muted
 		}
-		b.WriteString(fmt.Sprintf("  %-14s %-28s %-10s %s\n",
-			a.theme.Value.Render(d.number),
-			d.title,
-			a.theme.Muted.Render(d.level),
-			statusStyle.Render(d.status)))
+
+		if bp == BreakpointNarrow {
+			// Compact: number + status, title on next line
+			b.WriteString(fmt.Sprintf("  %s %s\n",
+				a.theme.Value.Render(d.number),
+				statusStyle.Render(d.status)))
+			b.WriteString(fmt.Sprintf("    %s\n", Truncate(d.title, a.width-6)))
+		} else {
+			b.WriteString(fmt.Sprintf("  %-14s %-28s %-10s %s\n",
+				a.theme.Value.Render(d.number),
+				d.title,
+				a.theme.Muted.Render(d.level),
+				statusStyle.Render(d.status)))
+		}
 	}
 
 	b.WriteString("\n")
