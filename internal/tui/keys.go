@@ -287,3 +287,15 @@ func (km KeyMap) GetFunctionKeyModule(msg tea.KeyMsg) string {
 func (km KeyMap) StatusBarHelp() string {
 	return "[F1]Help [F2]Dashboard [F3]Population [F4]Resources [F5]Facilities [F10]Quit"
 }
+
+// StatusBarHelpResponsive returns help text adapted to the terminal width.
+func (km KeyMap) StatusBarHelpResponsive(width int) string {
+	switch {
+	case width < 60:
+		return "[F1]? [F2]Dash [F3]Pop [F4]Res [F10]Quit"
+	case width < 100:
+		return "[F1]Help [F2]Dashboard [F3]Population [F4]Resources [F10]Quit"
+	default:
+		return "[F1]Help [F2]Dashboard [F3]Population [F4]Resources [F5]Facilities [F6]Labor [F7]Medical [F8]Security [F9]Governance [F10]Quit"
+	}
+}

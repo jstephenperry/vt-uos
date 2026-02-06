@@ -30,19 +30,17 @@ type InventoryView struct {
 	selectedCategory *string
 }
 
-// MaxContentWidth is the maximum width for content display
-const MaxContentWidth = 120
-
 // NewInventoryView creates a new inventory view.
 func NewInventoryView(service *resources.Service) *InventoryView {
+	// Columns with Weight for proportional sizing and Priority for drop order.
 	columns := []components.Column{
-		{Title: "Item Code", Width: 18},
-		{Title: "Name", Width: 25},
-		{Title: "Category", Width: 10},
-		{Title: "Quantity", Width: 12, Align: lipgloss.Right},
-		{Title: "Unit", Width: 8},
-		{Title: "Status", Width: 10},
-		{Title: "Expires", Width: 12},
+		{Title: "Item Code", Width: 14, Weight: 0, Priority: 10},
+		{Title: "Name", Width: 12, Weight: 2.5, Priority: 9},
+		{Title: "Category", Width: 10, Weight: 0, Priority: 4},
+		{Title: "Quantity", Width: 10, Align: lipgloss.Right, Priority: 8},
+		{Title: "Unit", Width: 8, Priority: 5},
+		{Title: "Status", Width: 10, Priority: 7},
+		{Title: "Expires", Width: 12, Priority: 3},
 	}
 
 	table := components.NewTable(columns)
@@ -152,6 +150,11 @@ func (v *InventoryView) SetCategoryFilter(categoryID *string) {
 	v.page.Page = 1
 }
 
+// SetVisibleRows sets the number of visible table rows.
+func (v *InventoryView) SetVisibleRows(n int) {
+	v.table.SetVisibleRows(n)
+}
+
 // NextPage moves to the next page.
 func (v *InventoryView) NextPage() {
 	v.page.Page++
@@ -188,7 +191,7 @@ func (v *InventoryView) GetCategories() []*models.ResourceCategory {
 	return v.categories
 }
 
-// Render renders the inventory view.
+// Render renders the inventory view, responsive to the given terminal dimensions.
 func (v *InventoryView) Render(width, height int) string {
 	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#66FF66")).Bold(true)
 	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00AA00"))
@@ -199,7 +202,7 @@ func (v *InventoryView) Render(width, height int) string {
 	var b strings.Builder
 
 	// Title
-	b.WriteString(titleStyle.Render("=== RESOURCE INVENTORY ==="))
+	b.WriteString(titleStyle.Render("═══ RESOURCE INVENTORY ═══"))
 	b.WriteString("\n\n")
 
 	// Category filter info
@@ -230,26 +233,36 @@ func (v *InventoryView) Render(width, height int) string {
 		b.WriteString(labelStyle.Render("No inventory found."))
 		b.WriteString("\n")
 	} else {
-		// Table
-		b.WriteString(v.table.Render())
+		// Render table with responsive width
+		b.WriteString(v.table.RenderResponsive(width))
 	}
 
-	// Help
+	// Help - adapt to width
 	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("Up/Down:Select  Enter:Details  c:Category  PgUp/Dn:Page"))
+	if width < 60 {
+		b.WriteString(helpStyle.Render("↑↓:Nav  Enter:View  c:Cat  PgUp/Dn"))
+	} else {
+		b.WriteString(helpStyle.Render("Up/Down:Select  Enter:Details  c:Category  PgUp/Dn:Page"))
+	}
 
 	return b.String()
 }
 
-// RenderDetail renders the detail view for the selected stock.
-func (v *InventoryView) RenderDetail(stock *models.ResourceStock) string {
+// RenderDetail renders the detail view for the selected stock, responsive to width.
+func (v *InventoryView) RenderDetail(stock *models.ResourceStock, width int) string {
 	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#66FF66")).Bold(true)
 	sectionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00"))
-	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00AA00")).Width(20)
 	valueStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00"))
 	warnStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FFFF00"))
 	critStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF4444"))
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00AA00"))
+
+	// Adapt label width to terminal
+	labelWidth := 20
+	if width < 60 {
+		labelWidth = 14
+	}
+	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00AA00")).Width(labelWidth)
 
 	if stock == nil {
 		return labelStyle.Render("No stock selected")
@@ -257,7 +270,7 @@ func (v *InventoryView) RenderDetail(stock *models.ResourceStock) string {
 
 	var b strings.Builder
 
-	b.WriteString(titleStyle.Render("=== STOCK DETAILS ==="))
+	b.WriteString(titleStyle.Render("═══ STOCK DETAILS ═══"))
 	b.WriteString("\n\n")
 
 	// Item Info

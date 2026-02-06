@@ -26,26 +26,24 @@ type CensusView struct {
 	vaultTime time.Time
 }
 
-// MaxContentWidth is the maximum width for content display
-const MaxContentWidth = 120
-
 // NewCensusView creates a new census view.
 func NewCensusView(service *population.Service) *CensusView {
-	// Columns sized to use ~110 chars of MaxContentWidth (leaving room for separators)
+	// Columns with Weight for proportional sizing and Priority for drop order.
+	// Higher priority = kept longer when terminal narrows.
 	columns := []components.Column{
-		{Title: "Registry #", Width: 12},
-		{Title: "Surname", Width: 15},
-		{Title: "Given Names", Width: 20},
-		{Title: "Age", Width: 4, Align: lipgloss.Right},
-		{Title: "Sex", Width: 3},
-		{Title: "Blood", Width: 5},
-		{Title: "Status", Width: 12},
-		{Title: "Entry", Width: 10},
-		{Title: "Clr", Width: 3, Align: lipgloss.Right},
+		{Title: "Registry #", Width: 12, Weight: 0, Priority: 10},
+		{Title: "Surname", Width: 10, Weight: 1.5, Priority: 9},
+		{Title: "Given Names", Width: 12, Weight: 2.0, Priority: 8},
+		{Title: "Age", Width: 4, Align: lipgloss.Right, Priority: 7},
+		{Title: "Sex", Width: 3, Priority: 5},
+		{Title: "Blood", Width: 5, Priority: 2},
+		{Title: "Status", Width: 10, Weight: 0, Priority: 6},
+		{Title: "Entry", Width: 10, Weight: 0, Priority: 3},
+		{Title: "Clr", Width: 3, Align: lipgloss.Right, Priority: 1},
 	}
 
 	table := components.NewTable(columns)
-	table.SetVisibleRows(25) // Show full page without scrolling
+	table.SetVisibleRows(25)
 	table.Focus(true)
 
 	return &CensusView{
@@ -115,6 +113,11 @@ func (v *CensusView) SetStatusFilter(status *models.ResidentStatus) {
 	v.page.Page = 1
 }
 
+// SetVisibleRows sets the number of visible table rows.
+func (v *CensusView) SetVisibleRows(n int) {
+	v.table.SetVisibleRows(n)
+}
+
 // NextPage moves to the next page.
 func (v *CensusView) NextPage() {
 	v.page.Page++
@@ -146,7 +149,7 @@ func (v *CensusView) SelectedResident() *models.Resident {
 	return nil
 }
 
-// Render renders the census view.
+// Render renders the census view, responsive to the given terminal dimensions.
 func (v *CensusView) Render(width, height int) string {
 	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#66FF66")).Bold(true)
 	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00AA00"))
@@ -157,7 +160,7 @@ func (v *CensusView) Render(width, height int) string {
 	var b strings.Builder
 
 	// Title
-	b.WriteString(titleStyle.Render("=== POPULATION CENSUS ==="))
+	b.WriteString(titleStyle.Render("═══ POPULATION CENSUS ═══"))
 	b.WriteString("\n\n")
 
 	// Search/filter info
@@ -191,24 +194,34 @@ func (v *CensusView) Render(width, height int) string {
 		b.WriteString(labelStyle.Render("No residents found."))
 		b.WriteString("\n")
 	} else {
-		// Table
-		b.WriteString(v.table.Render())
+		// Render table with responsive width
+		b.WriteString(v.table.RenderResponsive(width))
 	}
 
-	// Help
+	// Help - adapt to width
 	b.WriteString("\n")
-	b.WriteString(helpStyle.Render("Up/Down:Select  Enter:Details  s:Search  a:Add  PgUp/Dn:Page"))
+	if width < 60 {
+		b.WriteString(helpStyle.Render("↑↓:Nav  Enter:View  s:Search  a:Add"))
+	} else {
+		b.WriteString(helpStyle.Render("Up/Down:Select  Enter:Details  s:Search  a:Add  PgUp/Dn:Page"))
+	}
 
 	return b.String()
 }
 
-// RenderDetail renders the detail view for the selected resident.
-func (v *CensusView) RenderDetail(resident *models.Resident) string {
+// RenderDetail renders the detail view for the selected resident, responsive to width.
+func (v *CensusView) RenderDetail(resident *models.Resident, width int) string {
 	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#66FF66")).Bold(true)
 	sectionStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00"))
-	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00AA00")).Width(18)
 	valueStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00FF00"))
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00AA00"))
+
+	// Adapt label width to terminal
+	labelWidth := 18
+	if width < 60 {
+		labelWidth = 14
+	}
+	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00AA00")).Width(labelWidth)
 
 	if resident == nil {
 		return labelStyle.Render("No resident selected")
@@ -216,7 +229,7 @@ func (v *CensusView) RenderDetail(resident *models.Resident) string {
 
 	var b strings.Builder
 
-	b.WriteString(titleStyle.Render("=== RESIDENT DETAILS ==="))
+	b.WriteString(titleStyle.Render("═══ RESIDENT DETAILS ═══"))
 	b.WriteString("\n\n")
 
 	// Identity
@@ -260,18 +273,11 @@ func (v *CensusView) RenderDetail(resident *models.Resident) string {
 		b.WriteString("\n\n")
 	}
 
-	b.WriteString(helpStyle.Render("Esc:Back  e:Edit  d:Death Record"))
+	if width < 60 {
+		b.WriteString(helpStyle.Render("Esc:Back  e:Edit  d:Death"))
+	} else {
+		b.WriteString(helpStyle.Render("Esc:Back  e:Edit  d:Death Record"))
+	}
 
 	return b.String()
-}
-
-func formatHouseholdID(id *string) string {
-	if id == nil {
-		return "-"
-	}
-	// Truncate UUID to last 8 chars
-	if len(*id) > 8 {
-		return (*id)[len(*id)-8:]
-	}
-	return *id
 }
