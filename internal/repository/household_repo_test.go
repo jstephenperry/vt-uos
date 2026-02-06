@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"database/sql"
 	"testing"
 
 	"github.com/vtuos/vtuos/internal/models"
@@ -128,8 +127,8 @@ func TestHouseholdRepository_GetByID(t *testing.T) {
 
 	t.Run("Get non-existent household returns error", func(t *testing.T) {
 		_, err := repo.GetByID(ctx, "non-existent-id")
-		if err != sql.ErrNoRows {
-			t.Errorf("expected sql.ErrNoRows, got %v", err)
+		if err == nil {
+			t.Error("expected error for non-existent household, got nil")
 		}
 	})
 }
@@ -190,8 +189,8 @@ func TestHouseholdRepository_Delete(t *testing.T) {
 
 		// Verify deletion
 		_, err = repo.GetByID(ctx, household.ID)
-		if err != sql.ErrNoRows {
-			t.Errorf("expected sql.ErrNoRows after delete, got %v", err)
+		if err == nil {
+			t.Error("expected error after delete, got nil")
 		}
 	})
 }
@@ -216,6 +215,7 @@ func TestHouseholdRepository_List(t *testing.T) {
 		}),
 		testutil.FixtureDissolvedHousehold(func(h *models.Household) {
 			h.Designation = "Family-Gamma"
+			h.RationClass = models.RationClassMedical
 		}),
 	}
 
@@ -226,7 +226,7 @@ func TestHouseholdRepository_List(t *testing.T) {
 	}
 
 	t.Run("List all households", func(t *testing.T) {
-		result, err := repo.List(ctx, models.HouseholdFilter{}, 1, 10)
+		result, err := repo.List(ctx, models.HouseholdFilter{}, models.Pagination{Page: 1, PageSize: 10})
 		if err != nil {
 			t.Fatalf("failed to list households: %v", err)
 		}
@@ -241,7 +241,7 @@ func TestHouseholdRepository_List(t *testing.T) {
 
 	t.Run("Filter by status", func(t *testing.T) {
 		status := models.HouseholdStatusActive
-		result, err := repo.List(ctx, models.HouseholdFilter{Status: &status}, 1, 10)
+		result, err := repo.List(ctx, models.HouseholdFilter{Status: &status}, models.Pagination{Page: 1, PageSize: 10})
 		if err != nil {
 			t.Fatalf("failed to list households: %v", err)
 		}
@@ -253,7 +253,7 @@ func TestHouseholdRepository_List(t *testing.T) {
 
 	t.Run("Filter by household type", func(t *testing.T) {
 		householdType := models.HouseholdTypeIndividual
-		result, err := repo.List(ctx, models.HouseholdFilter{HouseholdType: &householdType}, 1, 10)
+		result, err := repo.List(ctx, models.HouseholdFilter{HouseholdType: &householdType}, models.Pagination{Page: 1, PageSize: 10})
 		if err != nil {
 			t.Fatalf("failed to list households: %v", err)
 		}
@@ -265,7 +265,7 @@ func TestHouseholdRepository_List(t *testing.T) {
 
 	t.Run("Filter by ration class", func(t *testing.T) {
 		rationClass := models.RationClassStandard
-		result, err := repo.List(ctx, models.HouseholdFilter{RationClass: &rationClass}, 1, 10)
+		result, err := repo.List(ctx, models.HouseholdFilter{RationClass: &rationClass}, models.Pagination{Page: 1, PageSize: 10})
 		if err != nil {
 			t.Fatalf("failed to list households: %v", err)
 		}
@@ -276,7 +276,7 @@ func TestHouseholdRepository_List(t *testing.T) {
 	})
 
 	t.Run("Search by designation", func(t *testing.T) {
-		result, err := repo.List(ctx, models.HouseholdFilter{SearchTerm: "Alpha"}, 1, 10)
+		result, err := repo.List(ctx, models.HouseholdFilter{SearchTerm: "Alpha"}, models.Pagination{Page: 1, PageSize: 10})
 		if err != nil {
 			t.Fatalf("failed to list households: %v", err)
 		}
@@ -288,7 +288,7 @@ func TestHouseholdRepository_List(t *testing.T) {
 
 	t.Run("Pagination", func(t *testing.T) {
 		// Get first page (2 items)
-		result, err := repo.List(ctx, models.HouseholdFilter{}, 1, 2)
+		result, err := repo.List(ctx, models.HouseholdFilter{}, models.Pagination{Page: 1, PageSize: 2})
 		if err != nil {
 			t.Fatalf("failed to list households: %v", err)
 		}

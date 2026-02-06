@@ -236,6 +236,73 @@ func FixtureResourceTransaction(itemID string, overrides ...func(*models.Resourc
 	return transaction
 }
 
+// FixtureFacilitySystem creates a test facility system with sensible defaults.
+func FixtureFacilitySystem(overrides ...func(*models.FacilitySystem)) *models.FacilitySystem {
+	id := uuid.New().String()
+	now := time.Now().UTC()
+	installDate := now.AddDate(-2, 0, 0)
+	nextMaint := now.AddDate(0, 1, 0)
+
+	system := &models.FacilitySystem{
+		ID:                      id,
+		SystemCode:              "PWR-GEN-" + id[:4],
+		Name:                    "Generator Unit " + id[:4],
+		Category:                models.SystemCategoryPower,
+		LocationSector:          "A",
+		LocationLevel:           2,
+		Status:                  models.SystemStatusOperational,
+		EfficiencyPercent:       95.0,
+		InstallDate:             installDate,
+		NextMaintenanceDue:      &nextMaint,
+		MaintenanceIntervalDays: 90,
+		TotalRuntimeHours:       17520,
+		CreatedAt:               now,
+		UpdatedAt:               now,
+	}
+
+	for _, override := range overrides {
+		override(system)
+	}
+
+	return system
+}
+
+// FixtureDegradedSystem creates a degraded facility system.
+func FixtureDegradedSystem(overrides ...func(*models.FacilitySystem)) *models.FacilitySystem {
+	return FixtureFacilitySystem(append([]func(*models.FacilitySystem){
+		func(s *models.FacilitySystem) {
+			s.Status = models.SystemStatusDegraded
+			s.EfficiencyPercent = 72.0
+			s.Category = models.SystemCategoryWaste
+			s.Name = "Waste Processing"
+			s.SystemCode = "WST-PROC-01"
+		},
+	}, overrides...)...)
+}
+
+// FixtureMaintenanceRecord creates a test maintenance record.
+func FixtureMaintenanceRecord(systemID string, overrides ...func(*models.MaintenanceRecord)) *models.MaintenanceRecord {
+	id := uuid.New().String()
+	now := time.Now().UTC()
+	scheduled := now.AddDate(0, 0, 7)
+
+	record := &models.MaintenanceRecord{
+		ID:              id,
+		SystemID:        systemID,
+		MaintenanceType: models.MaintenanceTypePreventive,
+		Description:     "Routine preventive maintenance",
+		ScheduledDate:   &scheduled,
+		CreatedAt:       now,
+		UpdatedAt:       now,
+	}
+
+	for _, override := range overrides {
+		override(record)
+	}
+
+	return record
+}
+
 // StringPtr returns a pointer to a string value.
 func StringPtr(s string) *string {
 	return &s
