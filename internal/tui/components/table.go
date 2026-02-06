@@ -11,9 +11,14 @@ import (
 // Column defines a table column.
 type Column struct {
 	Title    string
-	Width    int
+	Width    int // Used as base/minimum width for proportional sizing
 	Align    lipgloss.Position
 	Sortable bool
+	// Weight controls proportional sizing (0 = use fixed Width).
+	Weight float64
+	// Priority controls which columns are hidden first on narrow terminals.
+	// Higher priority columns are kept. 0 means always visible.
+	Priority int
 }
 
 // Table is a simple table component.
@@ -161,22 +166,124 @@ func (t *Table) GoToBottom() {
 	}
 }
 
-// Render renders the table.
+// computeWidths calculates the actual display width for each column based on
+// available terminal width. Columns with Weight > 0 get proportional space;
+// columns with Weight == 0 use their fixed Width. Low-priority columns are
+// dropped if the terminal is too narrow.
+func (t *Table) computeWidths(availableWidth int) []int {
+	widths := make([]int, len(t.columns))
+	visible := make([]bool, len(t.columns))
+
+	for i := range t.columns {
+		visible[i] = true
+	}
+
+	for {
+		visibleCount := 0
+		totalFixed := 0
+		totalWeight := 0.0
+		for i, col := range t.columns {
+			if !visible[i] {
+				continue
+			}
+			visibleCount++
+			if col.Weight > 0 {
+				totalWeight += col.Weight
+			} else {
+				totalFixed += col.Width
+			}
+		}
+
+		separatorWidth := 0
+		if visibleCount > 1 {
+			separatorWidth = (visibleCount - 1) * 3 // " | "
+		}
+		remaining := availableWidth - totalFixed - separatorWidth - 2 // -2 for row padding
+
+		if remaining >= 0 || visibleCount <= 1 {
+			// Distribute remaining space by weight
+			for i, col := range t.columns {
+				if !visible[i] {
+					widths[i] = 0
+					continue
+				}
+				if col.Weight > 0 && totalWeight > 0 {
+					w := int(float64(remaining) * col.Weight / totalWeight)
+					if w < col.Width {
+						w = col.Width
+					}
+					widths[i] = w
+				} else {
+					widths[i] = col.Width
+				}
+			}
+			break
+		}
+
+		// Drop lowest priority visible column
+		lowestPri := -1
+		lowestIdx := -1
+		for i, col := range t.columns {
+			if !visible[i] {
+				continue
+			}
+			if lowestPri == -1 || col.Priority < lowestPri {
+				lowestPri = col.Priority
+				lowestIdx = i
+			}
+		}
+		if lowestIdx < 0 {
+			break
+		}
+		visible[lowestIdx] = false
+	}
+
+	return widths
+}
+
+// Render renders the table using fixed column widths.
 func (t *Table) Render() string {
+	return t.RenderResponsive(0)
+}
+
+// RenderResponsive renders the table adapted to the given terminal width.
+// If width <= 0, it falls back to fixed column widths.
+func (t *Table) RenderResponsive(width int) string {
+	var colWidths []int
+	if width > 0 {
+		colWidths = t.computeWidths(width)
+	} else {
+		colWidths = make([]int, len(t.columns))
+		for i, col := range t.columns {
+			colWidths[i] = col.Width
+		}
+	}
+
 	var b strings.Builder
 
-	// Calculate total width
 	totalWidth := 0
-	for _, col := range t.columns {
-		totalWidth += col.Width + 3 // +3 for padding and separator
+	visibleCount := 0
+	for _, w := range colWidths {
+		if w > 0 {
+			totalWidth += w + 3
+			visibleCount++
+		}
+	}
+	if visibleCount > 0 {
+		totalWidth -= 3 // Last column has no trailing separator
+		totalWidth += 2 // Row padding
 	}
 
 	// Render header
-	b.WriteString(t.renderRow(t.getHeaders(), t.headerStyle, false))
+	b.WriteString(t.renderRowResponsive(t.getHeaders(), t.headerStyle, false, colWidths))
 	b.WriteString("\n")
 
 	// Render separator
-	b.WriteString(t.borderStyle.Render(strings.Repeat("-", totalWidth)))
+	sepWidth := totalWidth
+	if sepWidth < 1 {
+		sepWidth = 1
+	}
+	b.WriteString(t.borderStyle.Render(strings.Repeat("─", sepWidth)))
 	b.WriteString("\n")
 
 	// Render visible rows
@@ -198,15 +305,16 @@ func (t *Table) Render() string {
 			style = t.rowStyle
 		}
 
-		b.WriteString(t.renderRow(t.rows[i], style, isSelected))
+		b.WriteString(t.renderRowResponsive(t.rows[i], style, isSelected, colWidths))
 		b.WriteString("\n")
 	}
 
 	// Show pagination info
 	if t.totalPages > 0 {
-		b.WriteString(t.borderStyle.Render(strings.Repeat("-", totalWidth)))
+		b.WriteString(t.borderStyle.Render(strings.Repeat("─", sepWidth)))
 		b.WriteString("\n")
-		b.WriteString(t.borderStyle.Render(fmt.Sprintf("Page %d/%d | %d total", t.currentPage, t.totalPages, t.totalRows)))
+		pageInfo := fmt.Sprintf("Page %d/%d │ %d total", t.currentPage, t.totalPages, t.totalRows)
+		b.WriteString(t.borderStyle.Render(pageInfo))
 	}
 
 	return b.String()
@@ -221,40 +329,53 @@ func (t *Table) getHeaders() []string {
 }
 
 func (t *Table) renderRow(cells []string, style lipgloss.Style, isSelected bool) string {
+	widths := make([]int, len(t.columns))
+	for i, col := range t.columns {
+		widths[i] = col.Width
+	}
+	return t.renderRowResponsive(cells, style, isSelected, widths)
+}
+
+func (t *Table) renderRowResponsive(cells []string, style lipgloss.Style, isSelected bool, colWidths []int) string {
 	var parts []string
 
 	for i, col := range t.columns {
+		w := colWidths[i]
+		if w <= 0 {
+			continue // Column hidden
+		}
+
 		cell := ""
 		if i < len(cells) {
 			cell = cells[i]
 		}
 
 		// Truncate if too long
-		if len(cell) > col.Width {
-			cell = cell[:col.Width-1] + "…"
+		if len(cell) > w {
+			if w > 1 {
+				cell = cell[:w-1] + "…"
+			} else {
+				cell = cell[:w]
+			}
 		}
 
 		// Pad to width
 		switch col.Align {
 		case lipgloss.Right:
-			cell = fmt.Sprintf("%*s", col.Width, cell)
+			cell = fmt.Sprintf("%*s", w, cell)
 		case lipgloss.Center:
-			padding := col.Width - len(cell)
+			padding := w - len(cell)
 			leftPad := padding / 2
 			rightPad := padding - leftPad
 			cell = strings.Repeat(" ", leftPad) + cell + strings.Repeat(" ", rightPad)
 		default: // Left
-			cell = fmt.Sprintf("%-*s", col.Width, cell)
+			cell = fmt.Sprintf("%-*s", w, cell)
 		}
 
-		if isSelected {
-			parts = append(parts, style.Render(cell))
-		} else {
-			parts = append(parts, style.Render(cell))
-		}
+		parts = append(parts, style.Render(cell))
 	}
 
-	return " " + strings.Join(parts, " | ") + " "
+	return " " + strings.Join(parts, " │ ") + " "
 }
 
 // Empty returns true if the table has no rows.

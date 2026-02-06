@@ -266,12 +266,23 @@ func (f *ResidentForm) GetData() (*models.Resident, error) {
 	return r, nil
 }
 
-// Render renders the form.
+// Render renders the form with default width.
 func (f *ResidentForm) Render() string {
+	return f.RenderResponsive(0)
+}
+
+// RenderResponsive renders the form adapted to the given terminal width.
+func (f *ResidentForm) RenderResponsive(width int) string {
 	titleStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#66FF66")).Bold(true)
 	helpStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00AA00"))
 	errStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#FF4444"))
 	labelStyle := lipgloss.NewStyle().Foreground(lipgloss.Color("#00AA00"))
+
+	// Adapt label width to terminal
+	labelWidth := 16
+	if width > 0 && width < 60 {
+		labelWidth = 10
+	}
 
 	var b strings.Builder
 
@@ -280,36 +291,42 @@ func (f *ResidentForm) Render() string {
 	if f.mode == FormModeEdit {
 		title = "EDIT RESIDENT"
 	}
-	b.WriteString(titleStyle.Render("=== " + title + " ==="))
+	b.WriteString(titleStyle.Render("═══ " + title + " ═══"))
 	b.WriteString("\n\n")
 
 	// Name fields
-	b.WriteString(f.surname.Render())
+	b.WriteString(f.surname.RenderWithLabelWidth(labelWidth))
 	b.WriteString("\n")
-	b.WriteString(f.givenNames.Render())
+	b.WriteString(f.givenNames.RenderWithLabelWidth(labelWidth))
 	b.WriteString("\n\n")
 
-	// Date of birth
-	b.WriteString(labelStyle.Render("Date of Birth:  "))
-	b.WriteString(f.dobYear.Render())
+	// Date of birth - adapt layout for narrow terminals
+	dobLabel := lipgloss.NewStyle().Foreground(lipgloss.Color("#00AA00")).Width(labelWidth)
+	if width > 0 && width < 60 {
+		b.WriteString(dobLabel.Render("DOB:"))
+	} else {
+		b.WriteString(dobLabel.Render("Date of Birth:"))
+	}
+	b.WriteString(" ")
+	b.WriteString(f.dobYear.RenderWithLabelWidth(0))
 	b.WriteString(" - ")
-	b.WriteString(f.dobMonth.Render())
+	b.WriteString(f.dobMonth.RenderWithLabelWidth(0))
 	b.WriteString(" - ")
-	b.WriteString(f.dobDay.Render())
+	b.WriteString(f.dobDay.RenderWithLabelWidth(0))
 	b.WriteString("\n\n")
 
 	// Selects
-	b.WriteString(f.sex.Render())
+	b.WriteString(f.sex.RenderWithLabelWidth(labelWidth))
 	b.WriteString("\n")
-	b.WriteString(f.bloodType.Render())
+	b.WriteString(f.bloodType.RenderWithLabelWidth(labelWidth))
 	b.WriteString("\n")
-	b.WriteString(f.entryType.Render())
+	b.WriteString(f.entryType.RenderWithLabelWidth(labelWidth))
 	b.WriteString("\n\n")
 
 	// Other fields
-	b.WriteString(f.clearance.Render())
+	b.WriteString(f.clearance.RenderWithLabelWidth(labelWidth))
 	b.WriteString("\n")
-	b.WriteString(f.notes.Render())
+	b.WriteString(f.notes.RenderWithLabelWidth(labelWidth))
 	b.WriteString("\n")
 
 	// Error message
@@ -318,9 +335,14 @@ func (f *ResidentForm) Render() string {
 		b.WriteString(errStyle.Render("Error: " + f.err))
 	}
 
-	// Help
+	// Help - adapt to width
 	b.WriteString("\n\n")
-	b.WriteString(helpStyle.Render("Tab/Down:Next  Shift+Tab/Up:Prev  Ctrl+S:Save  Esc:Cancel"))
+	_ = labelStyle
+	if width > 0 && width < 60 {
+		b.WriteString(helpStyle.Render("Tab:Next  Ctrl+S:Save  Esc:Cancel"))
+	} else {
+		b.WriteString(helpStyle.Render("Tab/Down:Next  Shift+Tab/Up:Prev  Ctrl+S:Save  Esc:Cancel"))
+	}
 
 	return b.String()
 }

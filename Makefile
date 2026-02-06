@@ -44,7 +44,28 @@ test-coverage:
 	@echo "Running tests with coverage..."
 	go test -v -race -coverprofile=coverage.out ./internal/...
 	go tool cover -html=coverage.out -o coverage.html
+	go tool cover -func=coverage.out | grep total
 	@echo "Coverage report: coverage.html"
+
+# Run tests with coverage for specific package
+test-pkg:
+	@echo "Usage: make test-pkg PKG=./internal/models"
+	@if [ -z "$(PKG)" ]; then echo "Error: PKG not set"; exit 1; fi
+	go test -v -race -coverprofile=coverage.out $(PKG)
+	go tool cover -func=coverage.out
+
+# Run tests and check coverage threshold (80%)
+test-coverage-check:
+	@echo "Running tests with 80% coverage threshold..."
+	go test -v -race -coverprofile=coverage.out ./internal/...
+	@coverage=$$(go tool cover -func=coverage.out | grep total | awk '{print substr($$3, 1, length($$3)-1)}'); \
+	echo "Total coverage: $$coverage%"; \
+	if [ $$(echo "$$coverage < 80" | bc -l) -eq 1 ]; then \
+		echo "❌ Coverage ($$coverage%) is below 80% threshold"; \
+		exit 1; \
+	else \
+		echo "✅ Coverage ($$coverage%) meets 80% threshold"; \
+	fi
 
 # Run integration tests
 test-integration:
@@ -131,10 +152,12 @@ help:
 	@echo "  build-all      Build for all platforms"
 	@echo ""
 	@echo "Test targets:"
-	@echo "  test           Run unit tests"
-	@echo "  test-coverage  Run tests with coverage report"
-	@echo "  test-integration Run integration tests"
-	@echo "  test-all       Run all tests"
+	@echo "  test                  Run unit tests"
+	@echo "  test-coverage         Run tests with coverage report"
+	@echo "  test-coverage-check   Run tests and verify 80% coverage"
+	@echo "  test-pkg PKG=<path>   Run tests for specific package"
+	@echo "  test-integration      Run integration tests"
+	@echo "  test-all              Run all tests"
 	@echo ""
 	@echo "Other targets:"
 	@echo "  lint           Run golangci-lint"

@@ -24,8 +24,8 @@ var (
 	BuildTime = "unknown"
 )
 
-// MaxContentWidth is the maximum width for content display
-const MaxContentWidth = 120
+// chromeLines is the number of terminal lines reserved for header, alert, footer, separators.
+const chromeLines = 6
 
 // Module represents a view module in the application.
 type Module string
@@ -77,7 +77,9 @@ type App struct {
 	searchInput    string
 
 	// Alerts
-	alerts []Alert
+	alerts     []Alert
+	alertIndex int
+	alertTick  int
 
 	// Population count (updated periodically)
 	population int
@@ -186,12 +188,20 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.width = msg.Width
 		a.height = msg.Height
 		a.ready = true
+		// Update visible rows in views based on new height
+		a.updateViewDimensions()
 		return a, nil
 
 	case tickMsg:
 		// Update vault time in views
 		a.censusView.SetVaultTime(a.clock.Now())
 		a.inventoryView.SetVaultTime(a.clock.Now())
+		// Rotate alerts every 3 ticks
+		a.alertTick++
+		if a.alertTick >= 3 && len(a.alerts) > 1 {
+			a.alertTick = 0
+			a.alertIndex = (a.alertIndex + 1) % len(a.alerts)
+		}
 		return a, tickCmd()
 
 	case populationMsg:
@@ -231,6 +241,24 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	}
 
 	return a, nil
+}
+
+// updateViewDimensions recalculates visible rows for all views based on terminal height.
+func (a *App) updateViewDimensions() {
+	contentH := ContentHeight(a.height, chromeLines)
+	// Census table: subtract 4 lines for title, search info, separator, help line
+	censusRows := contentH - 6
+	if censusRows < 5 {
+		censusRows = 5
+	}
+	a.censusView.SetVisibleRows(censusRows)
+
+	// Inventory table: subtract 4 lines for title, filter info, separator, help line
+	invRows := contentH - 6
+	if invRows < 5 {
+		invRows = 5
+	}
+	a.inventoryView.SetVisibleRows(invRows)
 }
 
 // handleKeyPress processes key press events.
@@ -560,7 +588,7 @@ func (a *App) loadInventory() tea.Cmd {
 // View implements tea.Model.
 func (a *App) View() string {
 	if !a.ready {
-		return "Initializing..."
+		return "Initializing VT-UOS..."
 	}
 
 	if a.quitting {
@@ -578,7 +606,7 @@ func (a *App) View() string {
 	b.WriteString("\n")
 
 	// Main content area
-	contentHeight := a.height - 6 // header, alert, footer
+	contentHeight := ContentHeight(a.height, chromeLines)
 	if a.showConfirm {
 		b.WriteString(a.renderConfirmDialog(contentHeight))
 	} else {
@@ -592,42 +620,73 @@ func (a *App) View() string {
 	return b.String()
 }
 
-// renderHeader renders the top header bar.
+// renderHeader renders the top header bar, responsive to terminal width.
 func (a *App) renderHeader() string {
-	// Left side: title and version
-	title := fmt.Sprintf("VAULT-TEC UNIFIED OPERATING SYSTEM v%s", Version)
+	w := a.width
+	if w < 20 {
+		w = 20
+	}
+
+	// Left side: title
+	title := "VAULT-TEC UNIFIED OPERATING SYSTEM"
+	versionStr := fmt.Sprintf("v%s", Version)
 
 	// Right side: vault info
-	vaultInfo := fmt.Sprintf("%s | POP: %d",
+	vaultInfo := fmt.Sprintf("%s │ POP: %d",
 		a.config.Vault.Designation,
 		a.population,
 	)
 
-	// Calculate spacing
-	spacing := a.width - lipgloss.Width(title) - lipgloss.Width(vaultInfo) - 2
+	bp := GetBreakpoint(w)
+	switch bp {
+	case BreakpointNarrow:
+		// Compact: just vault designation and population
+		title = "VT-UOS"
+		vaultInfo = fmt.Sprintf("POP:%d", a.population)
+	case BreakpointMedium:
+		title = "VT-UOS " + versionStr
+	default:
+		title = title + " " + versionStr
+	}
+
+	titleRendered := a.theme.Header.Render(title)
+	infoRendered := a.theme.Header.Render(vaultInfo)
+	titleWidth := lipgloss.Width(titleRendered)
+	infoWidth := lipgloss.Width(infoRendered)
+
+	spacing := w - titleWidth - infoWidth
 	if spacing < 1 {
 		spacing = 1
 	}
 
-	header := a.theme.Header.Render(title) +
-		strings.Repeat(" ", spacing) +
-		a.theme.Header.Render(vaultInfo)
+	header := titleRendered + strings.Repeat(" ", spacing) + infoRendered
 
 	// Separator line
-	separator := a.theme.DrawDoubleLine(a.width)
+	separator := a.theme.DrawDoubleLine(w)
 
 	return header + "\n" + separator
 }
 
 // renderAlertBar renders the rotating alert display.
 func (a *App) renderAlertBar() string {
+	w := a.width
 	vaultTime := a.clock.Now()
-	timeStr := vaultTime.Format(a.config.Display.DateFormat + " " + a.config.Display.TimeFormat)
+
+	// Time display adapts to width
+	var timeStr string
+	bp := GetBreakpoint(w)
+	switch bp {
+	case BreakpointNarrow:
+		timeStr = vaultTime.Format(a.config.Display.TimeFormat)
+	default:
+		timeStr = vaultTime.Format(a.config.Display.DateFormat + " " + a.config.Display.TimeFormat)
+	}
 
 	// Show current time and any active alerts
 	var alertText string
 	if len(a.alerts) > 0 {
-		alert := a.alerts[0]
+		idx := a.alertIndex % len(a.alerts)
+		alert := a.alerts[idx]
 		switch alert.Level {
 		case AlertCritical:
 			alertText = a.theme.AlertCrit.Render("CRITICAL: " + alert.Message)
@@ -635,6 +694,11 @@ func (a *App) renderAlertBar() string {
 			alertText = a.theme.AlertWarn.Render("WARNING: " + alert.Message)
 		default:
 			alertText = a.theme.Alert.Render("INFO: " + alert.Message)
+		}
+		// Truncate alert to fit
+		maxAlertWidth := w - lipgloss.Width(timeStr) - 5
+		if maxAlertWidth > 0 && lipgloss.Width(alertText) > maxAlertWidth {
+			alertText = Truncate(alertText, maxAlertWidth)
 		}
 	} else {
 		alertText = a.theme.Muted.Render("All systems operational")
@@ -650,22 +714,13 @@ func (a *App) renderAlertBar() string {
 func (a *App) renderContent(height int) string {
 	content := a.getModuleContent()
 
-	// Constrain content width to MaxContentWidth
-	contentWidth := a.width
-	if contentWidth > MaxContentWidth {
-		contentWidth = MaxContentWidth
-	}
-
-	// Center the content container within the terminal
+	// Use full terminal width (content views handle their own width constraints)
 	style := lipgloss.NewStyle().
 		Width(a.width).
 		Height(height).
-		Align(lipgloss.Center, lipgloss.Top)
+		MaxHeight(height)
 
-	contentStyle := lipgloss.NewStyle().
-		Width(contentWidth)
-
-	return style.Render(contentStyle.Render(content))
+	return style.Render(content)
 }
 
 // getModuleContent returns the content for the current module.
@@ -677,6 +732,16 @@ func (a *App) getModuleContent() string {
 		return a.renderPopulation()
 	case ModuleResources:
 		return a.renderResources()
+	case ModuleFacilities:
+		return a.renderFacilities()
+	case ModuleLabor:
+		return a.renderLabor()
+	case ModuleMedical:
+		return a.renderMedical()
+	case ModuleSecurity:
+		return a.renderSecurity()
+	case ModuleGovernance:
+		return a.renderGovernance()
 	case ModuleHelp:
 		return a.renderHelp()
 	default:
@@ -688,13 +753,13 @@ func (a *App) getModuleContent() string {
 func (a *App) renderPopulation() string {
 	// Show form if active
 	if a.showForm && a.residentForm != nil {
-		return a.residentForm.Render()
+		return a.residentForm.RenderResponsive(a.width)
 	}
 
 	// Show detail if active
 	if a.showDetail {
 		resident := a.censusView.SelectedResident()
-		return a.censusView.RenderDetail(resident)
+		return a.censusView.RenderDetail(resident, a.width)
 	}
 
 	// Show search bar if in search mode
@@ -705,7 +770,7 @@ func (a *App) renderPopulation() string {
 			a.theme.Accent.Render("_") + "\n\n"
 	}
 
-	return searchBar + a.censusView.Render(a.width, a.height-6)
+	return searchBar + a.censusView.Render(a.width, a.height-chromeLines)
 }
 
 // renderResources renders the resources module.
@@ -713,52 +778,579 @@ func (a *App) renderResources() string {
 	// Show detail if active
 	if a.showDetail {
 		stock := a.inventoryView.SelectedStock()
-		return a.inventoryView.RenderDetail(stock)
+		return a.inventoryView.RenderDetail(stock, a.width)
 	}
 
-	return a.inventoryView.Render(a.width, a.height-6)
+	return a.inventoryView.Render(a.width, a.height-chromeLines)
 }
 
-// renderDashboard renders the main dashboard view.
+// renderDashboard renders the main dashboard view with responsive panels.
 func (a *App) renderDashboard() string {
+	w := a.width
+	if w < 40 {
+		w = 40
+	}
+
 	var b strings.Builder
 
+	// Title
 	b.WriteString(a.theme.Title.Render("═══ VAULT STATUS OVERVIEW ═══"))
 	b.WriteString("\n\n")
 
-	// Population summary
-	b.WriteString(a.theme.Subtitle.Render("POPULATION"))
-	b.WriteString("\n")
-	b.WriteString(fmt.Sprintf("  Active Residents: %d\n", a.population))
-	b.WriteString(fmt.Sprintf("  Vault Capacity:   %d\n", a.config.Vault.DesignedCapacity))
-	b.WriteString("\n")
+	bp := GetBreakpoint(w)
 
-	// System status
-	b.WriteString(a.theme.Subtitle.Render("CRITICAL SYSTEMS"))
-	b.WriteString("\n")
-	b.WriteString("  Power:        " + a.theme.Success.Render("OPERATIONAL") + "\n")
-	b.WriteString("  Water:        " + a.theme.Success.Render("OPERATIONAL") + "\n")
-	b.WriteString("  HVAC:         " + a.theme.Success.Render("OPERATIONAL") + "\n")
-	b.WriteString("  Security:     " + a.theme.Success.Render("OPERATIONAL") + "\n")
-	b.WriteString("\n")
+	// Build panels
+	popPanel := a.renderPopulationPanel(w, bp)
+	sysPanel := a.renderSystemsPanel(w, bp)
+	resPanel := a.renderResourcesPanel(w, bp)
+	simPanel := a.renderSimulationPanel(w, bp)
 
-	// Simulation status
-	if a.config.Simulation.Enabled {
-		status := "RUNNING"
-		if a.clock.IsPaused() {
-			status = "PAUSED"
-		}
-		b.WriteString(a.theme.Subtitle.Render("SIMULATION"))
+	switch bp {
+	case BreakpointNarrow:
+		// Stack all panels vertically
+		b.WriteString(popPanel)
 		b.WriteString("\n")
-		b.WriteString(fmt.Sprintf("  Status:     %s\n", status))
-		b.WriteString(fmt.Sprintf("  Time Scale: %.0fx\n", a.clock.TimeScale()))
+		b.WriteString(sysPanel)
+		b.WriteString("\n")
+		b.WriteString(resPanel)
+		b.WriteString("\n")
+		b.WriteString(simPanel)
+	default:
+		// Side-by-side: Population + Systems, then Resources + Simulation
+		halfWidth := w / 2
+		b.WriteString(renderSideBySide(popPanel, sysPanel, halfWidth, w))
+		b.WriteString("\n")
+		b.WriteString(renderSideBySide(resPanel, simPanel, halfWidth, w))
 	}
 
 	return b.String()
 }
 
-// renderHelp renders the help screen.
+// renderPopulationPanel renders the population status panel for the dashboard.
+func (a *App) renderPopulationPanel(totalWidth int, bp LayoutBreakpoint) string {
+	var b strings.Builder
+	b.WriteString(a.theme.Subtitle.Render("POPULATION"))
+	b.WriteString("\n")
+
+	capacity := a.config.Vault.DesignedCapacity
+	ratio := float64(a.population) / float64(capacity)
+
+	b.WriteString(fmt.Sprintf("  Active:   %s\n", a.theme.Value.Render(fmt.Sprintf("%d", a.population))))
+	b.WriteString(fmt.Sprintf("  Capacity: %s\n", a.theme.Muted.Render(fmt.Sprintf("%d", capacity))))
+
+	// Population bar
+	barWidth := totalWidth/2 - 4
+	if bp == BreakpointNarrow {
+		barWidth = totalWidth - 4
+	}
+	if barWidth > 40 {
+		barWidth = 40
+	}
+	if barWidth < 10 {
+		barWidth = 10
+	}
+	b.WriteString("  ")
+	b.WriteString(a.theme.ProgressBar(float64(a.population), float64(capacity), barWidth))
+	pctStr := fmt.Sprintf(" %.0f%%", ratio*100)
+	b.WriteString(a.theme.Muted.Render(pctStr))
+	b.WriteString("\n")
+
+	return b.String()
+}
+
+// renderSystemsPanel renders critical systems status for the dashboard.
+func (a *App) renderSystemsPanel(totalWidth int, bp LayoutBreakpoint) string {
+	var b strings.Builder
+	b.WriteString(a.theme.Subtitle.Render("CRITICAL SYSTEMS"))
+	b.WriteString("\n")
+
+	systems := []struct {
+		name   string
+		status string
+		pct    float64
+	}{
+		{"Power", "OPERATIONAL", 0.98},
+		{"Water", "OPERATIONAL", 0.95},
+		{"HVAC", "OPERATIONAL", 0.92},
+		{"Security", "OPERATIONAL", 1.0},
+	}
+
+	barWidth := 16
+	if bp == BreakpointNarrow {
+		barWidth = 10
+	}
+
+	for _, sys := range systems {
+		statusStyle := a.theme.Success
+		if sys.pct < 0.8 {
+			statusStyle = a.theme.Warning
+		}
+		if sys.pct < 0.5 {
+			statusStyle = a.theme.Error
+		}
+
+		line := fmt.Sprintf("  %-10s", sys.name)
+		b.WriteString(a.theme.Base.Render(line))
+		b.WriteString(a.theme.ProgressBar(sys.pct, 1.0, barWidth))
+		b.WriteString(" ")
+		b.WriteString(statusStyle.Render(sys.status))
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
+// renderResourcesPanel renders resource status for the dashboard.
+func (a *App) renderResourcesPanel(totalWidth int, bp LayoutBreakpoint) string {
+	var b strings.Builder
+	b.WriteString(a.theme.Subtitle.Render("RESOURCE STATUS"))
+	b.WriteString("\n")
+
+	// Placeholder resource data (would come from service in production)
+	resourceStats := []struct {
+		name    string
+		pct     float64
+		runway  int
+	}{
+		{"Food", 0.72, 180},
+		{"Water", 0.85, 240},
+		{"Medical", 0.60, 120},
+		{"Power", 0.90, 365},
+	}
+
+	barWidth := 16
+	if bp == BreakpointNarrow {
+		barWidth = 10
+	}
+
+	for _, res := range resourceStats {
+		line := fmt.Sprintf("  %-10s", res.name)
+		b.WriteString(a.theme.Base.Render(line))
+		b.WriteString(a.theme.ProgressBar(res.pct, 1.0, barWidth))
+		runway := fmt.Sprintf(" %dd", res.runway)
+		b.WriteString(a.theme.Muted.Render(runway))
+		b.WriteString("\n")
+	}
+
+	return b.String()
+}
+
+// renderSimulationPanel renders simulation status for the dashboard.
+func (a *App) renderSimulationPanel(totalWidth int, bp LayoutBreakpoint) string {
+	var b strings.Builder
+	b.WriteString(a.theme.Subtitle.Render("SIMULATION"))
+	b.WriteString("\n")
+
+	if !a.config.Simulation.Enabled {
+		b.WriteString(a.theme.Muted.Render("  Simulation disabled"))
+		b.WriteString("\n")
+		return b.String()
+	}
+
+	status := "RUNNING"
+	statusStyle := a.theme.Success
+	if a.clock.IsPaused() {
+		status = "PAUSED"
+		statusStyle = a.theme.Warning
+	}
+
+	vaultTime := a.clock.Now()
+	sealDate, err := a.config.Simulation.StartDateTime()
+	var years, days int
+	if err == nil {
+		elapsed := vaultTime.Sub(sealDate)
+		years = int(elapsed.Hours() / 8760)
+		days = int(elapsed.Hours()/24) % 365
+	}
+
+	b.WriteString(fmt.Sprintf("  Status:     %s\n", statusStyle.Render(status)))
+	b.WriteString(fmt.Sprintf("  Time Scale: %s\n", a.theme.Value.Render(fmt.Sprintf("%.0fx", a.clock.TimeScale()))))
+	b.WriteString(fmt.Sprintf("  Vault Time: %s\n", a.theme.Value.Render(vaultTime.Format("2006-01-02 15:04"))))
+	b.WriteString(fmt.Sprintf("  Elapsed:    %s\n", a.theme.Value.Render(fmt.Sprintf("%d years, %d days", years, days))))
+
+	return b.String()
+}
+
+// renderSideBySide renders two panels side by side, falling back to vertical stack.
+func renderSideBySide(left, right string, halfWidth, totalWidth int) string {
+	leftLines := strings.Split(left, "\n")
+	rightLines := strings.Split(right, "\n")
+
+	// Check if both fit
+	maxLeftWidth := 0
+	for _, l := range leftLines {
+		w := lipgloss.Width(l)
+		if w > maxLeftWidth {
+			maxLeftWidth = w
+		}
+	}
+
+	if maxLeftWidth+2 > halfWidth {
+		// Stack vertically
+		return left + "\n" + right
+	}
+
+	maxLines := len(leftLines)
+	if len(rightLines) > maxLines {
+		maxLines = len(rightLines)
+	}
+
+	var b strings.Builder
+	for i := 0; i < maxLines; i++ {
+		l := ""
+		if i < len(leftLines) {
+			l = leftLines[i]
+		}
+		r := ""
+		if i < len(rightLines) {
+			r = rightLines[i]
+		}
+
+		lw := lipgloss.Width(l)
+		pad := halfWidth - lw
+		if pad < 1 {
+			pad = 1
+		}
+
+		b.WriteString(l)
+		b.WriteString(strings.Repeat(" ", pad))
+		b.WriteString(r)
+		if i < maxLines-1 {
+			b.WriteString("\n")
+		}
+	}
+	return b.String()
+}
+
+// renderFacilities renders the facilities module placeholder with structure.
+func (a *App) renderFacilities() string {
+	w := a.width
+
+	var b strings.Builder
+	b.WriteString(a.theme.Title.Render("═══ FACILITY OPERATIONS ═══"))
+	b.WriteString("\n\n")
+
+	systems := []struct {
+		code       string
+		name       string
+		category   string
+		status     string
+		efficiency float64
+	}{
+		{"PWR-REACTOR-01", "Primary Reactor", "POWER", "OPERATIONAL", 0.98},
+		{"PWR-GEN-01", "Backup Generator A", "POWER", "STANDBY", 1.00},
+		{"WTR-PURIF-01", "Water Purification", "WATER", "OPERATIONAL", 0.95},
+		{"WTR-RECYCLE-01", "Water Recycler", "WATER", "OPERATIONAL", 0.88},
+		{"HVC-FILT-01", "Air Filtration", "HVAC", "OPERATIONAL", 0.92},
+		{"HVC-TEMP-01", "Climate Control", "HVAC", "OPERATIONAL", 0.94},
+		{"WST-PROC-01", "Waste Processing", "WASTE", "DEGRADED", 0.72},
+		{"SEC-DOOR-MAIN", "Vault Door", "SECURITY", "SEALED", 1.00},
+		{"MED-EQUIP-01", "Medical Bay", "MEDICAL", "OPERATIONAL", 0.97},
+		{"FPR-HYDRO-01", "Hydroponics Bay A", "FOOD_PROD", "OPERATIONAL", 0.85},
+		{"COM-TERM-01", "Terminal Network", "COMMS", "OPERATIONAL", 0.99},
+	}
+
+	bp := GetBreakpoint(w)
+	barWidth := 12
+	if bp == BreakpointNarrow {
+		barWidth = 8
+	}
+
+	nameWidth := 22
+	catWidth := 10
+	if bp == BreakpointNarrow {
+		nameWidth = 15
+		catWidth = 0 // hide category on narrow
+	}
+
+	for _, sys := range systems {
+		statusStyle := a.theme.Success
+		switch sys.status {
+		case "DEGRADED":
+			statusStyle = a.theme.Warning
+		case "OFFLINE", "FAILED":
+			statusStyle = a.theme.Error
+		case "STANDBY":
+			statusStyle = a.theme.Muted
+		case "SEALED":
+			statusStyle = a.theme.Accent
+		}
+
+		name := Truncate(sys.name, nameWidth)
+		line := fmt.Sprintf("  %-*s", nameWidth, name)
+		b.WriteString(a.theme.Base.Render(line))
+		if catWidth > 0 {
+			b.WriteString(a.theme.Muted.Render(fmt.Sprintf(" %-*s", catWidth, sys.category)))
+		}
+		b.WriteString(" ")
+		b.WriteString(a.theme.ProgressBar(sys.efficiency, 1.0, barWidth))
+		pctStr := fmt.Sprintf(" %3.0f%%", sys.efficiency*100)
+		b.WriteString(a.theme.Muted.Render(pctStr))
+		b.WriteString(" ")
+		b.WriteString(statusStyle.Render(sys.status))
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(a.theme.Muted.Render("  Facility management module — monitoring mode"))
+
+	return b.String()
+}
+
+// renderLabor renders the labor module placeholder with structure.
+func (a *App) renderLabor() string {
+	var b strings.Builder
+	b.WriteString(a.theme.Title.Render("═══ LABOR ALLOCATION ═══"))
+	b.WriteString("\n\n")
+
+	shifts := []struct {
+		name     string
+		hours    string
+		assigned int
+		capacity int
+	}{
+		{"ALPHA", "0600-1400", 165, 180},
+		{"BETA", "1400-2200", 152, 180},
+		{"GAMMA", "2200-0600", 48, 60},
+	}
+
+	bp := GetBreakpoint(a.width)
+	barWidth := 20
+	if bp == BreakpointNarrow {
+		barWidth = 12
+	}
+
+	b.WriteString(a.theme.Subtitle.Render("SHIFT ROSTER"))
+	b.WriteString("\n")
+	for _, shift := range shifts {
+		ratio := float64(shift.assigned) / float64(shift.capacity)
+		b.WriteString(fmt.Sprintf("  %-8s", shift.name))
+		b.WriteString(a.theme.Muted.Render(fmt.Sprintf("%-12s", shift.hours)))
+		b.WriteString(a.theme.ProgressBar(ratio, 1.0, barWidth))
+		b.WriteString(a.theme.Value.Render(fmt.Sprintf(" %d/%d", shift.assigned, shift.capacity)))
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(a.theme.Subtitle.Render("DEPARTMENT STAFFING"))
+	b.WriteString("\n")
+
+	depts := []struct {
+		name     string
+		filled   int
+		required int
+	}{
+		{"Engineering", 45, 50},
+		{"Security", 30, 35},
+		{"Medical", 20, 22},
+		{"Hydroponics", 35, 40},
+		{"Maintenance", 25, 30},
+		{"Administration", 15, 15},
+		{"Education", 10, 12},
+		{"Science", 12, 15},
+	}
+
+	for _, dept := range depts {
+		ratio := float64(dept.filled) / float64(dept.required)
+		statusStyle := a.theme.Success
+		if ratio < 0.9 {
+			statusStyle = a.theme.Warning
+		}
+		if ratio < 0.7 {
+			statusStyle = a.theme.Error
+		}
+		vacancy := dept.required - dept.filled
+
+		b.WriteString(fmt.Sprintf("  %-16s", dept.name))
+		b.WriteString(a.theme.ProgressBar(ratio, 1.0, barWidth))
+		b.WriteString(statusStyle.Render(fmt.Sprintf(" %d/%d", dept.filled, dept.required)))
+		if vacancy > 0 {
+			b.WriteString(a.theme.Warning.Render(fmt.Sprintf(" (%d vacant)", vacancy)))
+		}
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(a.theme.Muted.Render("  Labor allocation module — monitoring mode"))
+
+	return b.String()
+}
+
+// renderMedical renders the medical module placeholder with structure.
+func (a *App) renderMedical() string {
+	var b strings.Builder
+	b.WriteString(a.theme.Title.Render("═══ MEDICAL RECORDS ═══"))
+	b.WriteString("\n\n")
+
+	b.WriteString(a.theme.Subtitle.Render("VAULT HEALTH SUMMARY"))
+	b.WriteString("\n")
+	b.WriteString(fmt.Sprintf("  Healthy:         %s\n", a.theme.Success.Render("467")))
+	b.WriteString(fmt.Sprintf("  Minor Ailments:  %s\n", a.theme.Warning.Render("23")))
+	b.WriteString(fmt.Sprintf("  Serious:         %s\n", a.theme.Error.Render("8")))
+	b.WriteString(fmt.Sprintf("  Quarantine:      %s\n", a.theme.AlertCrit.Render("2")))
+	b.WriteString("\n")
+
+	b.WriteString(a.theme.Subtitle.Render("RADIATION LEVELS"))
+	b.WriteString("\n")
+
+	bp := GetBreakpoint(a.width)
+	barWidth := 20
+	if bp == BreakpointNarrow {
+		barWidth = 12
+	}
+
+	zones := []struct {
+		name string
+		msv  float64
+		max  float64
+	}{
+		{"Reactor Level", 0.8, 5.0},
+		{"Residential", 0.05, 5.0},
+		{"Hydroponics", 0.02, 5.0},
+		{"Vault Door", 1.2, 5.0},
+	}
+
+	for _, zone := range zones {
+		b.WriteString(fmt.Sprintf("  %-16s", zone.name))
+		b.WriteString(a.theme.ProgressBar(zone.msv, zone.max, barWidth))
+		b.WriteString(a.theme.Value.Render(fmt.Sprintf(" %.2f mSv", zone.msv)))
+		b.WriteString("\n")
+	}
+
+	b.WriteString("\n")
+	b.WriteString(a.theme.Subtitle.Render("RECENT ENCOUNTERS"))
+	b.WriteString("\n")
+	b.WriteString(a.theme.Base.Render("  No recent medical encounters recorded.\n"))
+
+	b.WriteString("\n")
+	b.WriteString(a.theme.Muted.Render("  Medical records module — monitoring mode"))
+
+	return b.String()
+}
+
+// renderSecurity renders the security module placeholder with structure.
+func (a *App) renderSecurity() string {
+	var b strings.Builder
+	b.WriteString(a.theme.Title.Render("═══ SECURITY ═══"))
+	b.WriteString("\n\n")
+
+	b.WriteString(a.theme.Subtitle.Render("SECURITY ZONES"))
+	b.WriteString("\n")
+
+	zones := []struct {
+		code      string
+		name      string
+		clearance int
+		status    string
+	}{
+		{"ZONE-A", "Command Center", 8, "SECURE"},
+		{"ZONE-B", "Residential", 1, "SECURE"},
+		{"ZONE-C", "Engineering", 4, "SECURE"},
+		{"ZONE-D", "Armory", 7, "LOCKED"},
+		{"ZONE-E", "Vault Door", 10, "SEALED"},
+		{"ZONE-F", "Reactor", 6, "RESTRICTED"},
+	}
+
+	bp := GetBreakpoint(a.width)
+	for _, zone := range zones {
+		statusStyle := a.theme.Success
+		switch zone.status {
+		case "LOCKED":
+			statusStyle = a.theme.Warning
+		case "SEALED":
+			statusStyle = a.theme.Accent
+		case "RESTRICTED":
+			statusStyle = a.theme.Warning
+		case "BREACH":
+			statusStyle = a.theme.Error
+		}
+
+		if bp == BreakpointNarrow {
+			// Compact: code + status only
+			b.WriteString(fmt.Sprintf("  %-8s CLR:%d %s\n",
+				zone.code,
+				zone.clearance,
+				statusStyle.Render(zone.status)))
+		} else {
+			b.WriteString(fmt.Sprintf("  %-8s %-18s CLR:%d  %s\n",
+				zone.code,
+				zone.name,
+				zone.clearance,
+				statusStyle.Render(zone.status)))
+		}
+	}
+
+	b.WriteString("\n")
+	b.WriteString(a.theme.Subtitle.Render("INCIDENT LOG"))
+	b.WriteString("\n")
+	b.WriteString(a.theme.Base.Render("  No active security incidents.\n"))
+
+	b.WriteString("\n")
+	b.WriteString(a.theme.Muted.Render("  Security module — monitoring mode"))
+
+	return b.String()
+}
+
+// renderGovernance renders the governance module placeholder with structure.
+func (a *App) renderGovernance() string {
+	var b strings.Builder
+	b.WriteString(a.theme.Title.Render("═══ GOVERNANCE ═══"))
+	b.WriteString("\n\n")
+
+	b.WriteString(a.theme.Subtitle.Render("ACTIVE DIRECTIVES"))
+	b.WriteString("\n")
+
+	directives := []struct {
+		number string
+		title  string
+		level  string
+		status string
+	}{
+		{"OD-2077-001", "Vault Sealing Protocol", "OVERSEER", "ACTIVE"},
+		{"OD-2077-002", "Resource Rationing Standard", "OVERSEER", "ACTIVE"},
+		{"OD-2077-003", "Emergency Power Protocol", "DEPT_HEAD", "ACTIVE"},
+		{"OD-2077-004", "Population Census Schedule", "OVERSEER", "ACTIVE"},
+		{"OD-2077-005", "Work Assignment Policy", "DEPT_HEAD", "ACTIVE"},
+	}
+
+	bp := GetBreakpoint(a.width)
+	for _, d := range directives {
+		statusStyle := a.theme.Success
+		if d.status != "ACTIVE" {
+			statusStyle = a.theme.Muted
+		}
+
+		if bp == BreakpointNarrow {
+			// Compact: number + status, title on next line
+			b.WriteString(fmt.Sprintf("  %s %s\n",
+				a.theme.Value.Render(d.number),
+				statusStyle.Render(d.status)))
+			b.WriteString(fmt.Sprintf("    %s\n", Truncate(d.title, a.width-6)))
+		} else {
+			b.WriteString(fmt.Sprintf("  %-14s %-28s %-10s %s\n",
+				a.theme.Value.Render(d.number),
+				d.title,
+				a.theme.Muted.Render(d.level),
+				statusStyle.Render(d.status)))
+		}
+	}
+
+	b.WriteString("\n")
+	b.WriteString(a.theme.Subtitle.Render("AUDIT LOG"))
+	b.WriteString("\n")
+	b.WriteString(a.theme.Base.Render("  System initialized. Awaiting overseer input.\n"))
+
+	b.WriteString("\n")
+	b.WriteString(a.theme.Muted.Render("  Governance module — monitoring mode"))
+
+	return b.String()
+}
+
+// renderHelp renders the help screen, responsive to terminal width.
 func (a *App) renderHelp() string {
+	w := a.width
+	bp := GetBreakpoint(w)
+
 	var b strings.Builder
 
 	b.WriteString(a.theme.Title.Render("═══ HELP ═══"))
@@ -780,10 +1372,24 @@ func (a *App) renderHelp() string {
 		{"F10", "Quit"},
 	}
 
-	for _, item := range navItems {
-		line := fmt.Sprintf("    %-8s  %s", item[0], item[1])
-		b.WriteString(a.theme.Primary.Render(line))
-		b.WriteString("\n")
+	// On wider terminals, render in two columns
+	if bp == BreakpointWide && len(navItems) > 5 {
+		half := (len(navItems) + 1) / 2
+		for i := 0; i < half; i++ {
+			left := fmt.Sprintf("    %-8s  %-24s", navItems[i][0], navItems[i][1])
+			b.WriteString(a.theme.Primary.Render(left))
+			if i+half < len(navItems) {
+				right := fmt.Sprintf("    %-8s  %s", navItems[i+half][0], navItems[i+half][1])
+				b.WriteString(a.theme.Primary.Render(right))
+			}
+			b.WriteString("\n")
+		}
+	} else {
+		for _, item := range navItems {
+			line := fmt.Sprintf("    %-8s  %s", item[0], item[1])
+			b.WriteString(a.theme.Primary.Render(line))
+			b.WriteString("\n")
+		}
 	}
 
 	b.WriteString("\n")
@@ -791,18 +1397,35 @@ func (a *App) renderHelp() string {
 	b.WriteString("\n\n")
 
 	ctrlItems := [][2]string{
-		{"Up/Down", "Navigate"},
-		{"Enter", "Select"},
-		{"Esc", "Back/Cancel"},
-		{"/", "Search"},
-		{"Tab", "Next field"},
+		{"Up/Down", "Navigate lists"},
+		{"Enter", "Select / Confirm"},
+		{"Esc", "Back / Cancel"},
+		{"/", "Search in lists"},
+		{"Tab", "Next field in forms"},
 		{"PgUp/Dn", "Page navigation"},
+		{"a", "Add new record"},
+		{"e", "Edit selected"},
+		{"d", "Delete / Death record"},
+		{"c", "Cycle category filter"},
 	}
 
-	for _, item := range ctrlItems {
-		line := fmt.Sprintf("    %-8s  %s", item[0], item[1])
-		b.WriteString(a.theme.Primary.Render(line))
-		b.WriteString("\n")
+	if bp == BreakpointWide && len(ctrlItems) > 5 {
+		half := (len(ctrlItems) + 1) / 2
+		for i := 0; i < half; i++ {
+			left := fmt.Sprintf("    %-10s  %-22s", ctrlItems[i][0], ctrlItems[i][1])
+			b.WriteString(a.theme.Primary.Render(left))
+			if i+half < len(ctrlItems) {
+				right := fmt.Sprintf("    %-10s  %s", ctrlItems[i+half][0], ctrlItems[i+half][1])
+				b.WriteString(a.theme.Primary.Render(right))
+			}
+			b.WriteString("\n")
+		}
+	} else {
+		for _, item := range ctrlItems {
+			line := fmt.Sprintf("    %-10s  %s", item[0], item[1])
+			b.WriteString(a.theme.Primary.Render(line))
+			b.WriteString("\n")
+		}
 	}
 
 	b.WriteString("\n")
@@ -844,13 +1467,13 @@ func (a *App) renderConfirmDialog(height int) string {
 	return style.Render(dialog)
 }
 
-// renderFooter renders the bottom status bar.
+// renderFooter renders the bottom status bar, responsive to terminal width.
 func (a *App) renderFooter() string {
 	// Draw separator
 	separator := a.theme.DrawHorizontalLine(a.width)
 
-	// Help text
-	help := a.keys.StatusBarHelp()
+	// Help text adapts to width
+	help := a.keys.StatusBarHelpResponsive(a.width)
 
 	return separator + "\n" + a.theme.Footer.Render(help)
 }
@@ -867,11 +1490,15 @@ func (a *App) AddAlert(level AlertLevel, message string) {
 	if len(a.alerts) > 10 {
 		a.alerts = a.alerts[:10]
 	}
+
+	// Reset alert rotation to show new alert
+	a.alertIndex = 0
 }
 
 // ClearAlerts removes all alerts.
 func (a *App) ClearAlerts() {
 	a.alerts = []Alert{}
+	a.alertIndex = 0
 }
 
 // Run starts the TUI application.
