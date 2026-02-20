@@ -248,6 +248,32 @@ func (r *ResidentRepository) List(ctx context.Context, filter models.ResidentFil
 	}, nil
 }
 
+// Delete removes a resident from the database.
+func (r *ResidentRepository) Delete(ctx context.Context, tx *sql.Tx, id string) error {
+	query := `DELETE FROM residents WHERE id = ?`
+
+	var execer interface {
+		ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	}
+	if tx != nil {
+		execer = tx
+	} else {
+		execer = r.db
+	}
+
+	result, err := execer.ExecContext(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("deleting resident: %w", err)
+	}
+
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("resident not found: %s", id)
+	}
+
+	return nil
+}
+
 // GetNextRegistryNumber generates the next available registry number.
 func (r *ResidentRepository) GetNextRegistryNumber(ctx context.Context, vaultNumber int) (string, error) {
 	query := `

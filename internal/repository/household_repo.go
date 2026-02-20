@@ -225,6 +225,42 @@ func (r *HouseholdRepository) List(ctx context.Context, filter models.HouseholdF
 	}, nil
 }
 
+// Delete removes a household from the database.
+func (r *HouseholdRepository) Delete(ctx context.Context, tx *sql.Tx, id string) error {
+	query := `DELETE FROM households WHERE id = ?`
+
+	var execer interface {
+		ExecContext(ctx context.Context, query string, args ...any) (sql.Result, error)
+	}
+	if tx != nil {
+		execer = tx
+	} else {
+		execer = r.db
+	}
+
+	result, err := execer.ExecContext(ctx, query, id)
+	if err != nil {
+		return fmt.Errorf("deleting household: %w", err)
+	}
+
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		return fmt.Errorf("household not found: %s", id)
+	}
+
+	return nil
+}
+
+// GetMemberCount returns the number of active residents in a household.
+func (r *HouseholdRepository) GetMemberCount(ctx context.Context, householdID string) (int, error) {
+	query := `SELECT COUNT(*) FROM residents WHERE household_id = ? AND status = 'ACTIVE'`
+	var count int
+	if err := r.db.QueryRowContext(ctx, query, householdID).Scan(&count); err != nil {
+		return 0, fmt.Errorf("counting household members: %w", err)
+	}
+	return count, nil
+}
+
 // GetNextDesignation generates the next available household designation.
 func (r *HouseholdRepository) GetNextDesignation(ctx context.Context) (string, error) {
 	query := `

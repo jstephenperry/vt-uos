@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	_ "modernc.org/sqlite" // SQLite driver
@@ -58,6 +59,7 @@ func NewTestDBWithFile(t *testing.T) *TestDB {
 }
 
 // RunMigrations executes SQL migration files in order.
+// Only executes the "Up" portion of each migration (before "-- +migrate Down").
 func (tdb *TestDB) RunMigrations(t *testing.T, migrationsDir string) {
 	t.Helper()
 
@@ -68,13 +70,9 @@ func (tdb *TestDB) RunMigrations(t *testing.T, migrationsDir string) {
 	}
 
 	ctx := context.Background()
-	tx, err := tdb.BeginTx(ctx, nil)
-	if err != nil {
-		t.Fatalf("failed to begin transaction: %v", err)
-	}
-	defer tx.Rollback()
 
-	// Execute each migration file
+	// Execute each migration file individually (SQLite in-memory needs
+	// tables to exist before indexes can reference them across files)
 	for _, file := range files {
 		if file.IsDir() || filepath.Ext(file.Name()) != ".sql" {
 			continue
@@ -86,13 +84,15 @@ func (tdb *TestDB) RunMigrations(t *testing.T, migrationsDir string) {
 			t.Fatalf("failed to read migration %s: %v", file.Name(), err)
 		}
 
-		if _, err := tx.ExecContext(ctx, string(sqlBytes)); err != nil {
+		// Extract only the "Up" portion (before "-- +migrate Down")
+		sqlStr := string(sqlBytes)
+		if idx := strings.Index(sqlStr, "-- +migrate Down"); idx >= 0 {
+			sqlStr = sqlStr[:idx]
+		}
+
+		if _, err := tdb.ExecContext(ctx, sqlStr); err != nil {
 			t.Fatalf("failed to execute migration %s: %v", file.Name(), err)
 		}
-	}
-
-	if err := tx.Commit(); err != nil {
-		t.Fatalf("failed to commit migrations: %v", err)
 	}
 }
 

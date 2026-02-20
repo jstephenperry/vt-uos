@@ -11,8 +11,10 @@ import (
 	"github.com/vtuos/vtuos/internal/config"
 	"github.com/vtuos/vtuos/internal/database"
 	"github.com/vtuos/vtuos/internal/models"
+	"github.com/vtuos/vtuos/internal/services/facilities"
 	"github.com/vtuos/vtuos/internal/services/population"
 	"github.com/vtuos/vtuos/internal/services/resources"
+	facviews "github.com/vtuos/vtuos/internal/tui/views/facilities"
 	popviews "github.com/vtuos/vtuos/internal/tui/views/population"
 	resviews "github.com/vtuos/vtuos/internal/tui/views/resources"
 	"github.com/vtuos/vtuos/internal/util"
@@ -53,11 +55,13 @@ type App struct {
 	// Services
 	populationSvc *population.Service
 	resourceSvc   *resources.Service
+	facilitySvc   *facilities.Service
 
 	// Views
 	censusView    *popviews.CensusView
 	residentForm  *popviews.ResidentForm
 	inventoryView *resviews.InventoryView
+	systemsView   *facviews.SystemsView
 
 	// UI state
 	theme       *Theme
@@ -112,6 +116,9 @@ func New(db *database.DB, cfg *config.Config, clock *util.VaultClock) *App {
 	// Create resource service
 	resSvc := resources.NewService(db.DB)
 
+	// Create facility service
+	facSvc := facilities.NewService(db.DB)
+
 	// Create census view
 	censusView := popviews.NewCensusView(popSvc)
 	censusView.SetVaultTime(clock.Now())
@@ -120,14 +127,20 @@ func New(db *database.DB, cfg *config.Config, clock *util.VaultClock) *App {
 	inventoryView := resviews.NewInventoryView(resSvc)
 	inventoryView.SetVaultTime(clock.Now())
 
+	// Create systems view
+	systemsView := facviews.NewSystemsView(facSvc)
+	systemsView.SetVaultTime(clock.Now())
+
 	return &App{
 		db:            db,
 		config:        cfg,
 		clock:         clock,
 		populationSvc: popSvc,
 		resourceSvc:   resSvc,
+		facilitySvc:   facSvc,
 		censusView:    censusView,
 		inventoryView: inventoryView,
+		systemsView:   systemsView,
 		theme:         NewTheme(cfg.Display.ColorScheme),
 		keys:          DefaultKeyMap(),
 		currentModule: ModuleDashboard,
@@ -178,6 +191,10 @@ type inventoryLoadedMsg struct {
 	err error
 }
 
+type systemsLoadedMsg struct {
+	err error
+}
+
 // Update implements tea.Model.
 func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
@@ -196,6 +213,7 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Update vault time in views
 		a.censusView.SetVaultTime(a.clock.Now())
 		a.inventoryView.SetVaultTime(a.clock.Now())
+		a.systemsView.SetVaultTime(a.clock.Now())
 		// Rotate alerts every 3 ticks
 		a.alertTick++
 		if a.alertTick >= 3 && len(a.alerts) > 1 {
@@ -217,6 +235,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case inventoryLoadedMsg:
 		if msg.err != nil {
 			a.AddAlert(AlertWarning, "Failed to load inventory: "+msg.err.Error())
+		}
+		return a, nil
+
+	case systemsLoadedMsg:
+		if msg.err != nil {
+			a.AddAlert(AlertWarning, "Failed to load systems: "+msg.err.Error())
 		}
 		return a, nil
 
@@ -259,6 +283,13 @@ func (a *App) updateViewDimensions() {
 		invRows = 5
 	}
 	a.inventoryView.SetVisibleRows(invRows)
+
+	// Systems table: same layout as inventory
+	sysRows := contentH - 6
+	if sysRows < 5 {
+		sysRows = 5
+	}
+	a.systemsView.SetVisibleRows(sysRows)
 }
 
 // handleKeyPress processes key press events.
@@ -314,6 +345,8 @@ func (a *App) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			return a, a.loadInventory()
 		case "facilities":
 			a.currentModule = ModuleFacilities
+			a.showDetail = false
+			return a, a.loadSystems()
 		case "labor":
 			a.currentModule = ModuleLabor
 		case "medical":
@@ -346,6 +379,10 @@ func (a *App) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	if a.currentModule == ModuleResources {
 		return a.handleResourceKeys(msg)
+	}
+
+	if a.currentModule == ModuleFacilities {
+		return a.handleFacilityKeys(msg)
 	}
 
 	return a, nil
@@ -575,6 +612,78 @@ func (a *App) handleResourceKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	}
 
 	return a, nil
+}
+
+// handleFacilityKeys handles key presses in the facilities module.
+func (a *App) handleFacilityKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if a.showDetail {
+		switch msg.String() {
+		case "esc":
+			a.showDetail = false
+		}
+		return a, nil
+	}
+
+	switch msg.String() {
+	case "up", "k":
+		a.systemsView.MoveUp()
+	case "down", "j":
+		a.systemsView.MoveDown()
+	case "enter":
+		if a.systemsView.SelectedSystem() != nil {
+			a.showDetail = true
+		}
+	case "pgup":
+		a.systemsView.PrevPage()
+		return a, a.loadSystems()
+	case "pgdown":
+		a.systemsView.NextPage()
+		return a, a.loadSystems()
+	case "c":
+		// Cycle category filter
+		categories := []models.SystemCategory{
+			models.SystemCategoryPower,
+			models.SystemCategoryWater,
+			models.SystemCategoryHVAC,
+			models.SystemCategorySecurity,
+			models.SystemCategoryMedical,
+			models.SystemCategoryFoodProduction,
+			models.SystemCategoryWaste,
+			models.SystemCategoryCommunications,
+			models.SystemCategoryStructural,
+		}
+		current := a.systemsView.GetCategoryFilter()
+		if current == nil {
+			a.systemsView.SetCategoryFilter(&categories[0])
+		} else {
+			found := false
+			for i, cat := range categories {
+				if *current == cat {
+					if i+1 < len(categories) {
+						a.systemsView.SetCategoryFilter(&categories[i+1])
+					} else {
+						a.systemsView.SetCategoryFilter(nil)
+					}
+					found = true
+					break
+				}
+			}
+			if !found {
+				a.systemsView.SetCategoryFilter(nil)
+			}
+		}
+		return a, a.loadSystems()
+	}
+
+	return a, nil
+}
+
+// loadSystems loads the facility systems data.
+func (a *App) loadSystems() tea.Cmd {
+	return func() tea.Msg {
+		err := a.systemsView.Load(context.Background())
+		return systemsLoadedMsg{err: err}
+	}
 }
 
 // loadInventory loads the inventory data.
@@ -1022,79 +1131,13 @@ func renderSideBySide(left, right string, halfWidth, totalWidth int) string {
 	return b.String()
 }
 
-// renderFacilities renders the facilities module placeholder with structure.
+// renderFacilities renders the facilities module.
 func (a *App) renderFacilities() string {
-	w := a.width
-
-	var b strings.Builder
-	b.WriteString(a.theme.Title.Render("═══ FACILITY OPERATIONS ═══"))
-	b.WriteString("\n\n")
-
-	systems := []struct {
-		code       string
-		name       string
-		category   string
-		status     string
-		efficiency float64
-	}{
-		{"PWR-REACTOR-01", "Primary Reactor", "POWER", "OPERATIONAL", 0.98},
-		{"PWR-GEN-01", "Backup Generator A", "POWER", "STANDBY", 1.00},
-		{"WTR-PURIF-01", "Water Purification", "WATER", "OPERATIONAL", 0.95},
-		{"WTR-RECYCLE-01", "Water Recycler", "WATER", "OPERATIONAL", 0.88},
-		{"HVC-FILT-01", "Air Filtration", "HVAC", "OPERATIONAL", 0.92},
-		{"HVC-TEMP-01", "Climate Control", "HVAC", "OPERATIONAL", 0.94},
-		{"WST-PROC-01", "Waste Processing", "WASTE", "DEGRADED", 0.72},
-		{"SEC-DOOR-MAIN", "Vault Door", "SECURITY", "SEALED", 1.00},
-		{"MED-EQUIP-01", "Medical Bay", "MEDICAL", "OPERATIONAL", 0.97},
-		{"FPR-HYDRO-01", "Hydroponics Bay A", "FOOD_PROD", "OPERATIONAL", 0.85},
-		{"COM-TERM-01", "Terminal Network", "COMMS", "OPERATIONAL", 0.99},
+	if a.showDetail {
+		system := a.systemsView.SelectedSystem()
+		return a.systemsView.RenderDetail(system, a.width)
 	}
-
-	bp := GetBreakpoint(w)
-	barWidth := 12
-	if bp == BreakpointNarrow {
-		barWidth = 8
-	}
-
-	nameWidth := 22
-	catWidth := 10
-	if bp == BreakpointNarrow {
-		nameWidth = 15
-		catWidth = 0 // hide category on narrow
-	}
-
-	for _, sys := range systems {
-		statusStyle := a.theme.Success
-		switch sys.status {
-		case "DEGRADED":
-			statusStyle = a.theme.Warning
-		case "OFFLINE", "FAILED":
-			statusStyle = a.theme.Error
-		case "STANDBY":
-			statusStyle = a.theme.Muted
-		case "SEALED":
-			statusStyle = a.theme.Accent
-		}
-
-		name := Truncate(sys.name, nameWidth)
-		line := fmt.Sprintf("  %-*s", nameWidth, name)
-		b.WriteString(a.theme.Base.Render(line))
-		if catWidth > 0 {
-			b.WriteString(a.theme.Muted.Render(fmt.Sprintf(" %-*s", catWidth, sys.category)))
-		}
-		b.WriteString(" ")
-		b.WriteString(a.theme.ProgressBar(sys.efficiency, 1.0, barWidth))
-		pctStr := fmt.Sprintf(" %3.0f%%", sys.efficiency*100)
-		b.WriteString(a.theme.Muted.Render(pctStr))
-		b.WriteString(" ")
-		b.WriteString(statusStyle.Render(sys.status))
-		b.WriteString("\n")
-	}
-
-	b.WriteString("\n")
-	b.WriteString(a.theme.Muted.Render("  Facility management module — monitoring mode"))
-
-	return b.String()
+	return a.systemsView.Render(a.width, a.height-chromeLines)
 }
 
 // renderLabor renders the labor module placeholder with structure.
