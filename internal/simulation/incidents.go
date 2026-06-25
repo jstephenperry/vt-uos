@@ -58,7 +58,7 @@ func (e *Engine) rollIncidents(ctx context.Context, asOf time.Time) {
 		w  int
 	}
 	table := []weighted{
-		{e.incidentEquipmentFault, 30 + int((100-avgEff))},
+		{e.incidentEquipmentFault, 30 + int((100 - avgEff))},
 		{e.incidentContamination, 15},
 		{e.incidentIllness, 20},
 		{e.incidentDiscovery, 12},

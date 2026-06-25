@@ -1,0 +1,112 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>VT-UOS · {{.Vault}} · Overseer Console</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <header class="bar">
+    <div class="brand">
+      <span class="logo">▣</span>
+      <span class="title">VAULT-TEC UNIFIED OPERATING SYSTEM</span>
+    </div>
+    <div class="ident">
+      <span id="vaultName">{{.Vault}}</span>
+      <span class="sep">│</span>
+      <span id="simStatus" class="status">—</span>
+      <span class="sep">│</span>
+      <span id="vaultTime">----</span>
+    </div>
+  </header>
+
+  <div class="tokenbar">
+    <label>OVERSEER TOKEN
+      <input id="token" type="password" placeholder="operator token (if required)" autocomplete="off">
+    </label>
+    <button id="saveToken">SET</button>
+    <span id="conn" class="conn off">OFFLINE</span>
+  </div>
+
+  <nav class="tabs">
+    <button class="tab active" data-tab="overview">OVERVIEW</button>
+    <button class="tab" data-tab="simulation">SIMULATION</button>
+    <button class="tab" data-tab="systems">SYSTEMS</button>
+    <button class="tab" data-tab="clients">TERMINALS</button>
+    <button class="tab" data-tab="events">EVENT LOG</button>
+  </nav>
+
+  <main>
+    <section id="overview" class="panel active">
+      <div class="grid">
+        <div class="card"><h2>POPULATION</h2><div id="popCard"></div></div>
+        <div class="card"><h2>POWER</h2><div id="powerCard"></div></div>
+        <div class="card"><h2>SYSTEMS</h2><div id="sysSummary"></div></div>
+        <div class="card"><h2>RESOURCE RUNWAY</h2><div id="resCard"></div></div>
+        <div class="card wide"><h2>ACTIVE ALERTS</h2><div id="alertsCard"></div></div>
+      </div>
+    </section>
+
+    <section id="simulation" class="panel">
+      <div class="card">
+        <h2>CONTROL CORE</h2>
+        <div id="simInfo"></div>
+        <div class="controls">
+          <button data-act="resume">▶ RESUME</button>
+          <button data-act="pause">‖ PAUSE</button>
+          <button data-act="step" data-hours="1">STEP 1h</button>
+          <button data-act="step" data-hours="24">STEP 1d</button>
+          <button data-act="step" data-hours="168">STEP 1w</button>
+          <button data-act="snapshot">⤓ SNAPSHOT</button>
+        </div>
+        <div class="controls">
+          <label>TIME SCALE
+            <select id="scaleSel">
+              <option value="0">Frozen</option>
+              <option value="1">1× (real time)</option>
+              <option value="60">60× (1 min → 1 hr)</option>
+              <option value="600">600×</option>
+              <option value="1440">1440× (1 min → 1 day)</option>
+              <option value="3600">3600×</option>
+              <option value="14400">14400×</option>
+              <option value="86400">86400× (1 sec → 1 day)</option>
+            </select>
+          </label>
+          <button data-act="scale">APPLY SCALE</button>
+        </div>
+        <p id="simMsg" class="msg"></p>
+      </div>
+    </section>
+
+    <section id="systems" class="panel">
+      <div class="card"><h2>FACILITY SYSTEMS</h2><table id="sysTable"><thead><tr>
+        <th>CODE</th><th>NAME</th><th>CATEGORY</th><th>STATUS</th><th>EFFICIENCY</th></tr></thead>
+        <tbody></tbody></table></div>
+    </section>
+
+    <section id="clients" class="panel">
+      <div class="card"><h2>CONNECTED TERMINALS</h2>
+        <p class="hint">Issue remote operations to managed display terminals. Operator token required.</p>
+        <table id="cliTable"><thead><tr>
+          <th>NAME</th><th>KIND</th><th>STATE</th><th>VIEW</th><th>ADDRESS</th><th>LAST SEEN</th><th>REMOTE OPS</th>
+        </tr></thead><tbody></tbody></table>
+      </div>
+    </section>
+
+    <section id="events" class="panel">
+      <div class="card"><h2>OPERATIONAL EVENT LOG</h2><div id="eventList"></div></div>
+    </section>
+  </main>
+
+  <footer class="bar foot">
+    <span>RobCo Industries (TM) · Overseer Terminal</span>
+    <span>Protocol {{.Protocol}}</span>
+  </footer>
+
+  <script>
+    window.VTUOS = { protocol: "{{.Protocol}}", heartbeat: {{.Heartbeat}}, vaultNumber: {{.VaultNumber}} };
+  </script>
+  <script src="/static/app.js"></script>
+</body>
+</html>

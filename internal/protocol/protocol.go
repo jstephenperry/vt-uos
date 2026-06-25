@@ -49,13 +49,13 @@ type Alert struct {
 // Events correspond to real occurrences (equipment faults, spoilage, medical
 // incidents, recovered caches) and are mirrored to the persistent audit log.
 type EventRecord struct {
-	ID       string     `json:"id"`
-	VaultTime time.Time `json:"vault_time"`
-	Category string     `json:"category"`
-	Type     string     `json:"type"`
-	Severity AlertLevel `json:"severity"`
-	Summary  string     `json:"summary"`
-	Detail   string     `json:"detail,omitempty"`
+	ID        string     `json:"id"`
+	VaultTime time.Time  `json:"vault_time"`
+	Category  string     `json:"category"`
+	Type      string     `json:"type"`
+	Severity  AlertLevel `json:"severity"`
+	Summary   string     `json:"summary"`
+	Detail    string     `json:"detail,omitempty"`
 }
 
 // ResourceStatus summarises a single resource category for the operations board.
@@ -172,14 +172,14 @@ type RegisterResponse struct {
 // Telemetry is the health information a client reports back to the master on
 // each heartbeat — this is the "report back to the server" channel.
 type Telemetry struct {
-	UptimeSeconds int64  `json:"uptime_seconds"`
-	CurrentView   string `json:"current_view"`
-	KioskMode     bool   `json:"kiosk_mode"`
+	UptimeSeconds  int64  `json:"uptime_seconds"`
+	CurrentView    string `json:"current_view"`
+	KioskMode      bool   `json:"kiosk_mode"`
 	FramesRendered uint64 `json:"frames_rendered"`
-	Errors        uint64 `json:"errors"`
-	WidthCols     int    `json:"width_cols"`
-	HeightRows    int    `json:"height_rows"`
-	Note          string `json:"note,omitempty"`
+	Errors         uint64 `json:"errors"`
+	WidthCols      int    `json:"width_cols"`
+	HeightRows     int    `json:"height_rows"`
+	Note           string `json:"note,omitempty"`
 }
 
 // HeartbeatResponse is returned to a client heartbeat. It carries any pending
