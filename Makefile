@@ -1,7 +1,7 @@
 # VT-UOS Makefile
 # Build automation for Vault-Tec Unified Operating System
 
-.PHONY: all build build-pi build-pi-zero test test-integration lint clean run migrate seed help
+.PHONY: all build build-pi build-pi-zero test test-integration lint clean run serve connect migrate seed help
 
 # Build variables
 BINARY_NAME := vtuos
@@ -87,10 +87,21 @@ fmt:
 	go fmt ./...
 	goimports -w .
 
-# Run the application
+# Run the application (local operator console)
 run: build
 	@echo "Running $(BINARY_NAME)..."
 	./bin/$(BINARY_NAME)
+
+# Run as the master server (authoritative core + API + web console)
+serve: build
+	@echo "Starting VT-UOS master server (web console on :8080)..."
+	./bin/$(BINARY_NAME) serve
+
+# Connect a client display terminal to a master (set ADDR=host:port)
+connect: build
+	@echo "Connecting terminal to master at $(ADDR)..."
+	@if [ -z "$(ADDR)" ]; then echo "Error: ADDR not set (e.g. make connect ADDR=127.0.0.1:8080)"; exit 1; fi
+	./bin/$(BINARY_NAME) connect $(ADDR)
 
 # Run database migrations
 migrate:
@@ -162,7 +173,9 @@ help:
 	@echo "Other targets:"
 	@echo "  lint           Run golangci-lint"
 	@echo "  fmt            Format code with gofmt and goimports"
-	@echo "  run            Build and run the application"
+	@echo "  run            Build and run the local operator console"
+	@echo "  serve          Build and run the master server + web console"
+	@echo "  connect ADDR=  Build and connect a client terminal to a master"
 	@echo "  migrate        Run database migrations"
 	@echo "  seed           Generate seed data"
 	@echo "  clean          Remove build artifacts"
