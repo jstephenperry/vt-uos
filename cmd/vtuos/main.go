@@ -60,6 +60,7 @@ func signalContext() (context.Context, context.CancelFunc) {
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 	go func() {
 		sig := <-sigChan
+		signal.Stop(sigChan) // deregister; the goroutine exits after cancelling
 		slog.Info("received shutdown signal", "signal", sig)
 		cancel()
 		time.AfterFunc(10*time.Second, func() {

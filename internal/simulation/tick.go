@@ -12,6 +12,11 @@ import (
 // consumption, degradation, maintenance, incidents, demographics) is performed
 // once per simulated day, which bounds database writes regardless of time scale.
 func (e *Engine) advanceTo(ctx context.Context, now time.Time) error {
+	// Serialize processing: the automatic run loop and an explicit Step must
+	// never run a day cycle (or touch the RNG) concurrently.
+	e.procMu.Lock()
+	defer e.procMu.Unlock()
+
 	e.mu.Lock()
 	last := e.lastProc
 	e.mu.Unlock()

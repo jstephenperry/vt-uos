@@ -75,8 +75,10 @@ func (e *Engine) registerNaturalDeath(ctx context.Context, asOf time.Time) {
 
 // registerVaultBirth records a birth when a viable parental pairing exists.
 func (e *Engine) registerVaultBirth(ctx context.Context, asOf time.Time) {
-	adultCutoff := asOf.AddDate(-18, 0, 0).Format(time.RFC3339)
-	fertileFloor := asOf.AddDate(-45, 0, 0).Format(time.RFC3339)
+	// date_of_birth is stored as a DATE ('YYYY-MM-DD'); compare against the same
+	// format so SQLite's comparison and any date functions behave correctly.
+	adultCutoff := asOf.AddDate(-18, 0, 0).Format(time.DateOnly)
+	fertileFloor := asOf.AddDate(-45, 0, 0).Format(time.DateOnly)
 
 	// Choose an active adult mother of child-bearing age who shares a household.
 	var motherID, householdID, surname string
@@ -84,10 +86,10 @@ func (e *Engine) registerVaultBirth(ctx context.Context, asOf time.Time) {
 		WHERE status = 'ACTIVE' AND sex = 'F' AND household_id IS NOT NULL
 		  AND date_of_birth <= ? AND date_of_birth >= ?
 		LIMIT 1 OFFSET ?`
-	countQ := fmt.Sprintf(`SELECT COUNT(*) FROM residents
+	const countQ = `SELECT COUNT(*) FROM residents
 		WHERE status='ACTIVE' AND sex='F' AND household_id IS NOT NULL
-		  AND date_of_birth <= '%s' AND date_of_birth >= '%s'`, adultCutoff, fertileFloor)
-	offset := e.randomOffset(ctx, countQ)
+		  AND date_of_birth <= ? AND date_of_birth >= ?`
+	offset := e.randomOffset(ctx, countQ, adultCutoff, fertileFloor)
 	if offset < 0 {
 		return
 	}

@@ -2,6 +2,7 @@ package simulation
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -216,6 +217,49 @@ func TestEnginePersistenceRoundTrip(t *testing.T) {
 	if eng2.Clock().Now().Before(clock.Now().Add(-time.Hour)) {
 		t.Error("restored clock did not advance to persisted vault time")
 	}
+}
+
+func TestEngineConcurrentSubscribeBroadcast(t *testing.T) {
+	ctx := context.Background()
+	eng, _ := newTestEngine(t)
+	defer eng.Stop(ctx)
+
+	var wg sync.WaitGroup
+	stop := make(chan struct{})
+
+	// Continuously subscribe/unsubscribe while broadcasts occur — this is the
+	// interleaving that previously sent on a closed channel.
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for {
+				select {
+				case <-stop:
+					return
+				default:
+				}
+				id, ch := eng.Subscribe()
+				// Drain a little so the buffer can fill, then release.
+				select {
+				case <-ch:
+				default:
+				}
+				eng.Unsubscribe(id)
+			}
+		}()
+	}
+
+	// Drive broadcasts via stepping and direct control changes.
+	for i := 0; i < 30; i++ {
+		eng.Pause()
+		eng.Resume()
+		if err := eng.Step(ctx, 6); err != nil {
+			t.Fatalf("step: %v", err)
+		}
+	}
+	close(stop)
+	wg.Wait()
 }
 
 func TestEngineSubscribe(t *testing.T) {

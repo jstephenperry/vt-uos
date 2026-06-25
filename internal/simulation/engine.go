@@ -82,6 +82,11 @@ type Engine struct {
 	subs   map[int]chan protocol.VaultState
 	nextID int
 
+	// procMu serializes interval processing so the automatic run loop and an
+	// explicit Step can never process concurrently (protecting the engine's
+	// single RNG and its read-modify-write database access).
+	procMu sync.Mutex
+
 	// lifecycle
 	runMu   sync.Mutex
 	running bool
@@ -108,6 +113,7 @@ func New(db *database.DB, cfg *config.Config, clock *util.VaultClock) *Engine {
 		status:   protocol.SimPaused,
 		dailyUse: make(map[string]float64),
 		subs:     make(map[int]chan protocol.VaultState),
+		events:   make([]protocol.EventRecord, 0, eventBufferSize),
 	}
 	if sd, err := cfg.Simulation.StartDateTime(); err == nil {
 		e.sealDate = sd
@@ -387,16 +393,15 @@ func (e *Engine) Unsubscribe(id int) {
 }
 
 // broadcast pushes the current state to all subscribers without blocking.
+//
+// The non-blocking sends are performed while holding the read lock. Because
+// Unsubscribe (which closes channels) takes the write lock, it cannot run
+// concurrently with broadcast, so a send can never target a closed channel.
 func (e *Engine) broadcast() {
 	e.mu.RLock()
+	defer e.mu.RUnlock()
 	st := e.cloneState()
-	subs := make([]chan protocol.VaultState, 0, len(e.subs))
 	for _, ch := range e.subs {
-		subs = append(subs, ch)
-	}
-	e.mu.RUnlock()
-
-	for _, ch := range subs {
 		select {
 		case ch <- st:
 		default:

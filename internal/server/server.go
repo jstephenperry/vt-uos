@@ -26,6 +26,7 @@ type Server struct {
 	clients *ClientRegistry
 	log     *slog.Logger
 	httpSrv *http.Server
+	done    chan struct{}
 }
 
 // New constructs a master server bound to the given control core and config.
@@ -36,6 +37,7 @@ func New(engine *simulation.Engine, cfg *config.Config) (*Server, error) {
 		cfg:     cfg,
 		clients: NewClientRegistry(timeout),
 		log:     slog.Default().With("component", "server"),
+		done:    make(chan struct{}),
 	}
 	s.httpSrv = &http.Server{
 		Addr:              cfg.Server.Listen,
@@ -111,14 +113,42 @@ func (s *Server) Start() error {
 		"web_console", s.cfg.Server.EnableWeb,
 		"vault", s.cfg.Vault.Designation,
 	)
+	go s.cleanupLoop()
 	if err := s.httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		return fmt.Errorf("http server: %w", err)
 	}
 	return nil
 }
 
+// cleanupLoop periodically reclaims client entries that have gone silent well
+// past their timeout, bounding registry memory over long-running deployments.
+func (s *Server) cleanupLoop() {
+	timeout := time.Duration(s.cfg.Server.ClientTimeoutSeconds) * time.Second
+	if timeout <= 0 {
+		timeout = 20 * time.Second
+	}
+	maxAge := timeout * 10
+	ticker := time.NewTicker(time.Minute)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-s.done:
+			return
+		case <-ticker.C:
+			if n := s.clients.CleanupStale(maxAge); n > 0 {
+				s.log.Info("reclaimed stale client terminals", "count", n)
+			}
+		}
+	}
+}
+
 // Shutdown gracefully stops the server.
 func (s *Server) Shutdown(ctx context.Context) error {
+	select {
+	case <-s.done:
+	default:
+		close(s.done)
+	}
 	return s.httpSrv.Shutdown(ctx)
 }
 

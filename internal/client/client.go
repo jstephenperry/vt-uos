@@ -28,6 +28,7 @@ type model struct {
 	bannerUntil time.Time
 	kiosk       bool
 	frames      uint64
+	errors      uint64
 	quitting    bool
 
 	stateCh chan protocol.VaultState
@@ -123,6 +124,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case hbResultMsg:
 		if msg.err != nil {
 			m.connected = false
+			m.errors++
 			return m, nil
 		}
 		return m.applyCommands(msg.commands)
@@ -173,6 +175,7 @@ func (m *model) doHeartbeat() tea.Cmd {
 		CurrentView:    m.page,
 		KioskMode:      m.kiosk,
 		FramesRendered: m.frames,
+		Errors:         m.errors,
 		WidthCols:      m.width,
 		HeightRows:     m.height,
 	}
@@ -212,6 +215,7 @@ func (m *model) applyCommands(cmds []protocol.Command) (tea.Model, tea.Cmd) {
 			effects = append(effects, tea.Quit)
 		default:
 			ok, message = false, "unsupported command"
+			m.errors++
 		}
 		effects = append(effects, m.reportResult(c.ID, ok, message))
 	}
@@ -236,8 +240,12 @@ func Run(ctx context.Context, conn *Conn, cfg *config.Config) error {
 	theme := tui.NewTheme(cfg.Display.ColorScheme)
 	m := newModel(conn, theme, rr.VaultDesignation)
 
-	// Stream live state in the background, reconnecting on failure.
+	// Stream live state in the background, reconnecting on failure. Closing the
+	// channels when this goroutine exits unblocks the model's listen commands so
+	// the Bubble Tea loop can drain cleanly.
 	go func() {
+		defer close(m.stateCh)
+		defer close(m.connCh)
 		for ctx.Err() == nil {
 			if err := conn.StreamStates(ctx, m.stateCh); err != nil {
 				select {

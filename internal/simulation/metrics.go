@@ -31,7 +31,7 @@ func (e *Engine) recomputeState(ctx context.Context) error {
 	pop := e.buildPopulation(ctx, now)
 	res := e.buildResources(ctx)
 	sysSummary, sysList := e.buildSystems(ctx, now)
-	power := e.buildPower(sysList)
+	power := e.buildPower(ctx, sysList)
 
 	e.mu.Lock()
 	e.state.SchemaVersion = protocol.Version
@@ -73,10 +73,11 @@ func (e *Engine) buildPopulation(ctx context.Context, asOf time.Time) protocol.P
 		FROM residents`)
 	_ = rows.Scan(&p.Active, &p.Deceased, &p.Quarantined)
 
+	// date_of_birth is stored as 'YYYY-MM-DD'; pass the same format to julianday.
 	_ = e.db.QueryRowContext(ctx,
 		`SELECT COALESCE(AVG((julianday(?) - julianday(date_of_birth))/365.25),0)
 		 FROM residents WHERE status='ACTIVE'`,
-		asOf.UTC().Format(time.RFC3339)).Scan(&p.AverageAge)
+		asOf.UTC().Format(time.DateOnly)).Scan(&p.AverageAge)
 
 	if p.Capacity > 0 {
 		p.LoadPct = float64(p.Active) / float64(p.Capacity) * 100
@@ -169,7 +170,7 @@ func (e *Engine) buildSystems(ctx context.Context, asOf time.Time) (protocol.Sys
 }
 
 // buildPower estimates the vault's electrical balance from current systems.
-func (e *Engine) buildPower(systems []protocol.SystemStatus) protocol.PowerStatus {
+func (e *Engine) buildPower(ctx context.Context, systems []protocol.SystemStatus) protocol.PowerStatus {
 	var gen, cons float64
 	for _, s := range systems {
 		operational := s.Status == string(models.SystemStatusOperational) ||
@@ -184,7 +185,7 @@ func (e *Engine) buildPower(systems []protocol.SystemStatus) protocol.PowerStatu
 		cons += nominalDrawKW[s.Category]
 	}
 	// Generation from rated capacity scaled by efficiency.
-	_ = e.db.QueryRowContext(context.Background(),
+	_ = e.db.QueryRowContext(ctx,
 		`SELECT COALESCE(SUM(COALESCE(capacity_rating,0)*efficiency_percent/100.0),0)
 		 FROM facility_systems
 		 WHERE category='POWER' AND status IN ('OPERATIONAL','DEGRADED')`).Scan(&gen)

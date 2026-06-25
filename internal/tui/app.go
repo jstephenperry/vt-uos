@@ -95,10 +95,15 @@ type App struct {
 	searchMode     bool // Search input mode
 	searchInput    string
 
-	// Alerts
-	alerts     []Alert
-	alertIndex int
-	alertTick  int
+	// Alerts. The displayed list (alerts) is rebuilt from two sources: alerts
+	// the UI raises directly (userAlerts, e.g. action confirmations) and alerts
+	// derived from the control core's live state (engineAlerts). Keeping them
+	// separate means live syncing never discards operator feedback.
+	alerts       []Alert
+	userAlerts   []Alert
+	engineAlerts []Alert
+	alertIndex   int
+	alertTick    int
 
 	// Population count (updated periodically)
 	population int
@@ -432,6 +437,7 @@ func (a *App) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// In kiosk mode the exhibit cannot be closed by visitors; only an
 		// operator at the console (Ctrl+C) may exit.
 		if a.kiosk && msg.String() != "ctrl+c" {
+			a.AddAlert(AlertInfo, "Kiosk mode active — exit is disabled")
 			return a, nil
 		}
 		a.showConfirm = true
@@ -548,24 +554,27 @@ func (a *App) handleSimulationKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 }
 
 // stepSim advances the simulation by the given number of hours off the UI
-// goroutine and reports completion.
+// goroutine and reports completion. The engine reference is captured on the UI
+// goroutine so the background closure does not read the mutable a.engine field.
 func (a *App) stepSim(hours int) tea.Cmd {
+	engine := a.engine
 	return func() tea.Msg {
-		if a.engine == nil {
+		if engine == nil {
 			return simSteppedMsg{}
 		}
-		err := a.engine.Step(context.Background(), hours)
+		err := engine.Step(context.Background(), hours)
 		return simSteppedMsg{err: err}
 	}
 }
 
 // snapshotSim captures a vault snapshot off the UI goroutine.
 func (a *App) snapshotSim() tea.Cmd {
+	engine := a.engine
 	return func() tea.Msg {
-		if a.engine == nil {
+		if engine == nil {
 			return snapshotMsg{err: fmt.Errorf("no simulation core attached")}
 		}
-		path, err := a.engine.CreateSnapshot(context.Background())
+		path, err := engine.CreateSnapshot(context.Background())
 		return snapshotMsg{path: path, err: err}
 	}
 }
@@ -1820,27 +1829,38 @@ func (a *App) renderFooter() string {
 	return separator + "\n" + a.theme.Footer.Render(help)
 }
 
-// AddAlert adds a new alert to the display.
+// AddAlert raises a UI alert (e.g. an action confirmation or warning).
 func (a *App) AddAlert(level AlertLevel, message string) {
-	a.alerts = append([]Alert{{
+	a.userAlerts = append([]Alert{{
 		Level:   level,
 		Message: message,
 		Time:    time.Now(),
-	}}, a.alerts...)
+	}}, a.userAlerts...)
 
-	// Keep only last 10 alerts
-	if len(a.alerts) > 10 {
-		a.alerts = a.alerts[:10]
+	// Keep only the most recent user alerts.
+	if len(a.userAlerts) > 10 {
+		a.userAlerts = a.userAlerts[:10]
 	}
 
-	// Reset alert rotation to show new alert
+	a.rebuildAlerts()
+	a.alertIndex = 0 // surface the new alert immediately
+}
+
+// ClearAlerts removes all alerts (both UI and engine-derived).
+func (a *App) ClearAlerts() {
+	a.userAlerts = nil
+	a.engineAlerts = nil
+	a.alerts = nil
 	a.alertIndex = 0
 }
 
-// ClearAlerts removes all alerts.
-func (a *App) ClearAlerts() {
-	a.alerts = []Alert{}
-	a.alertIndex = 0
+// rebuildAlerts recomputes the displayed alert list from the two sources,
+// UI-raised alerts first.
+func (a *App) rebuildAlerts() {
+	a.alerts = append(append([]Alert{}, a.userAlerts...), a.engineAlerts...)
+	if a.alertIndex >= len(a.alerts) {
+		a.alertIndex = 0
+	}
 }
 
 // renderSimulation renders the simulation control core console.
@@ -1875,10 +1895,8 @@ func (a *App) syncAlertsFromEngine() {
 		}
 		out = append(out, Alert{Level: level, Message: al.Message, Time: al.Raised})
 	}
-	a.alerts = out
-	if a.alertIndex >= len(a.alerts) {
-		a.alertIndex = 0
-	}
+	a.engineAlerts = out
+	a.rebuildAlerts()
 }
 
 // updateAttract engages or advances unattended attract (kiosk) mode based on

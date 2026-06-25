@@ -163,7 +163,7 @@ async function refreshClients() {
 
 window.op = async function (id, type) {
   const args = {};
-  if (type === "SWITCH_VIEW") { const v = prompt("View (dashboard, population, resources, facilities, simulation, security):", "dashboard"); if (!v) return; args.view = v; }
+  if (type === "SWITCH_VIEW") { const v = prompt("View (dashboard, systems, resources, events, population):", "dashboard"); if (!v) return; args.view = v; }
   if (type === "MESSAGE") { const t = prompt("Message to display:"); if (!t) return; args.text = t; }
   if (type === "SET_KIOSK") { args.enabled = confirm("Enable kiosk mode? OK = enable, Cancel = disable") ? "true" : "false"; }
   try { await post(`/api/v1/clients/${id}/command`, { type, args }); setMsg(`Queued ${type} for terminal.`); refreshClients(); }

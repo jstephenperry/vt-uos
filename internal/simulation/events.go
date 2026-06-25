@@ -38,7 +38,10 @@ func (e *Engine) emitEvent(ctx context.Context, asOf time.Time, category, evType
 	e.mu.Lock()
 	e.events = append(e.events, rec)
 	if len(e.events) > eventBufferSize {
-		e.events = e.events[len(e.events)-eventBufferSize:]
+		// Drop the oldest entry in place, retaining the backing array's
+		// capacity to avoid a reallocation on every append past the cap.
+		copy(e.events, e.events[len(e.events)-eventBufferSize:])
+		e.events = e.events[:eventBufferSize]
 	}
 	e.mu.Unlock()
 

@@ -111,6 +111,11 @@ func (r *ClientRegistry) ReportResult(id, token string, res protocol.CommandResu
 	return true
 }
 
+// maxPendingCommands bounds the per-client remote-operation queue so an
+// operator (or a buggy caller) issuing commands to an offline terminal cannot
+// grow memory without limit.
+const maxPendingCommands = 64
+
 // IssueCommand queues a remote operation for the given client.
 func (r *ClientRegistry) IssueCommand(id string, cmd protocol.Command) bool {
 	r.mu.Lock()
@@ -126,8 +131,29 @@ func (r *ClientRegistry) IssueCommand(id string, cmd protocol.Command) bool {
 		cmd.Issued = r.nowFn()
 	}
 	c.pending = append(c.pending, cmd)
+	if len(c.pending) > maxPendingCommands {
+		// Drop the oldest queued operations, keeping the most recent.
+		c.pending = c.pending[len(c.pending)-maxPendingCommands:]
+	}
 	c.info.PendingCmds = len(c.pending)
 	return true
+}
+
+// CleanupStale removes clients that have been silent for longer than maxAge,
+// reclaiming their entries and any queued commands. It returns the number
+// removed.
+func (r *ClientRegistry) CleanupStale(maxAge time.Duration) int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	now := r.nowFn()
+	removed := 0
+	for id, c := range r.clients {
+		if now.Sub(c.info.LastSeen) > maxAge {
+			delete(r.clients, id)
+			removed++
+		}
+	}
+	return removed
 }
 
 // List returns a snapshot of all known clients with online status computed from

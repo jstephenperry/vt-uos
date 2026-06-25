@@ -264,10 +264,11 @@ func (e *Engine) randomSystem(ctx context.Context, where string) *models.Facilit
 }
 
 // randomOffset returns a deterministic random offset within the row count
-// produced by the given COUNT(*) query, or -1 if there are no rows.
-func (e *Engine) randomOffset(ctx context.Context, countQuery string) int {
+// produced by the given COUNT(*) query, or -1 if there are no rows. Query
+// arguments are passed through as bind parameters.
+func (e *Engine) randomOffset(ctx context.Context, countQuery string, args ...any) int {
 	var n int
-	if err := e.db.QueryRowContext(ctx, countQuery).Scan(&n); err != nil || n <= 0 {
+	if err := e.db.QueryRowContext(ctx, countQuery, args...).Scan(&n); err != nil || n <= 0 {
 		return -1
 	}
 	return e.rng.Intn(n)

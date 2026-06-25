@@ -9,9 +9,11 @@ import (
 	"github.com/vtuos/vtuos/internal/protocol"
 )
 
-// decodeJSON reads a JSON request body into v with a sane size limit.
-func decodeJSON(r *http.Request, v any) error {
-	dec := json.NewDecoder(http.MaxBytesReader(nil, r.Body, 1<<20))
+// decodeJSON reads a JSON request body into v with a sane size limit. The
+// ResponseWriter is passed to MaxBytesReader so an oversized body produces a
+// proper 413 response and the connection is handled correctly.
+func decodeJSON(w http.ResponseWriter, r *http.Request, v any) error {
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
 	return dec.Decode(v)
 }
 
@@ -91,7 +93,7 @@ func (s *Server) handleSimResume(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSimScale(w http.ResponseWriter, r *http.Request) {
 	var req protocol.ControlRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -105,7 +107,7 @@ func (s *Server) handleSimScale(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleSimStep(w http.ResponseWriter, r *http.Request) {
 	var req protocol.ControlRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -117,7 +119,8 @@ func (s *Server) handleSimStep(w http.ResponseWriter, r *http.Request) {
 		hours = 8760 // cap a single manual step to one simulated year
 	}
 	if err := s.engine.Step(r.Context(), hours); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.log.Error("simulation step via API failed", "hours", hours, "error", err)
+		writeError(w, http.StatusInternalServerError, "simulation step failed")
 		return
 	}
 	s.log.Info("simulation stepped via API", "hours", hours, "by", r.RemoteAddr)
@@ -127,7 +130,8 @@ func (s *Server) handleSimStep(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleSimSnapshot(w http.ResponseWriter, r *http.Request) {
 	path, err := s.engine.CreateSnapshot(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		s.log.Error("snapshot via API failed", "error", err)
+		writeError(w, http.StatusInternalServerError, "snapshot creation failed")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"snapshot": path})
@@ -135,7 +139,7 @@ func (s *Server) handleSimSnapshot(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleAckAlert(w http.ResponseWriter, r *http.Request) {
 	var req protocol.ControlRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -147,7 +151,7 @@ func (s *Server) handleAckAlert(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleClientRegister(w http.ResponseWriter, r *http.Request) {
 	var req protocol.RegisterRequest
-	if err := decodeJSON(r, &req); err != nil {
+	if err := decodeJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -166,7 +170,7 @@ func (s *Server) handleClientHeartbeat(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	token := r.Header.Get("X-Client-Token")
 	var tel protocol.Telemetry
-	if err := decodeJSON(r, &tel); err != nil {
+	if err := decodeJSON(w, r, &tel); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid telemetry body")
 		return
 	}
@@ -186,7 +190,7 @@ func (s *Server) handleClientResult(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	token := r.Header.Get("X-Client-Token")
 	var res protocol.CommandResult
-	if err := decodeJSON(r, &res); err != nil {
+	if err := decodeJSON(w, r, &res); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid result body")
 		return
 	}
@@ -204,7 +208,7 @@ func (s *Server) handleClientList(w http.ResponseWriter, r *http.Request) {
 func (s *Server) handleClientCommand(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	var cmd protocol.Command
-	if err := decodeJSON(r, &cmd); err != nil {
+	if err := decodeJSON(w, r, &cmd); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid command body")
 		return
 	}
