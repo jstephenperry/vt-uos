@@ -148,12 +148,15 @@ func ParseISO8601(s string) (time.Time, error) {
 	return time.Parse(ISO8601Format, s)
 }
 
-// CalculateAge calculates age in years from date of birth.
+// CalculateAge calculates age in years from date of birth. The birthday check
+// compares calendar month and day (rather than day-of-year) so leap years do
+// not introduce an off-by-one error.
 func CalculateAge(dob time.Time, asOf time.Time) int {
 	years := asOf.Year() - dob.Year()
 
 	// Adjust if birthday hasn't occurred yet this year
-	if asOf.YearDay() < dob.YearDay() {
+	if asOf.Month() < dob.Month() ||
+		(asOf.Month() == dob.Month() && asOf.Day() < dob.Day()) {
 		years--
 	}
 

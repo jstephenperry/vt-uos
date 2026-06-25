@@ -17,6 +17,35 @@ type Config struct {
 	Display    DisplayConfig    `toml:"display"`
 	Logging    LoggingConfig    `toml:"logging"`
 	Database   DatabaseConfig   `toml:"database"`
+	Exhibit    ExhibitConfig    `toml:"exhibit"`
+	Server     ServerConfig     `toml:"server"`
+	Client     ClientConfig     `toml:"client"`
+}
+
+// ExhibitConfig controls interactive-exhibit presentation behaviours such as the
+// boot sequence and unattended attract (kiosk) mode.
+type ExhibitConfig struct {
+	BootSequence       bool `toml:"boot_sequence"`        // show a boot screen at startup
+	AttractMode        bool `toml:"attract_mode"`         // auto-rotate views when idle
+	AttractIdleSeconds int  `toml:"attract_idle_seconds"` // idle time before attract engages
+	RotateSeconds      int  `toml:"rotate_seconds"`       // seconds per view in attract mode
+	Kiosk              bool `toml:"kiosk"`                // disable quit and destructive actions
+}
+
+// ServerConfig controls the master server (vtuos serve): its listen address,
+// operator authentication, embedded web console, and client management timings.
+type ServerConfig struct {
+	Listen               string `toml:"listen"`                 // e.g. ":8080"
+	AdminToken           string `toml:"admin_token"`            // operator token for control/admin endpoints
+	EnableWeb            bool   `toml:"enable_web"`             // serve the web administration console
+	HeartbeatSeconds     int    `toml:"heartbeat_seconds"`      // client heartbeat cadence
+	ClientTimeoutSeconds int    `toml:"client_timeout_seconds"` // mark a client offline after this silence
+}
+
+// ClientConfig controls the client terminal (vtuos connect).
+type ClientConfig struct {
+	Name string `toml:"name"` // display name reported to the master
+	Kind string `toml:"kind"` // DISPLAY or OPERATOR
 }
 
 // VaultConfig contains vault identity and physical specifications.
@@ -374,6 +403,27 @@ func Default() *Config {
 			Path:                "vault.db",
 			BackupIntervalHours: 24,
 			BackupRetentionDays: 30,
+		},
+		Exhibit: ExhibitConfig{
+			// Off by default: the console behaves as a utilitarian operator tool.
+			// Exhibit deployments enable these in their config (see
+			// testdata/vault-exhibit.toml).
+			BootSequence:       false,
+			AttractMode:        false,
+			AttractIdleSeconds: 120,
+			RotateSeconds:      12,
+			Kiosk:              false,
+		},
+		Server: ServerConfig{
+			Listen:               ":8080",
+			AdminToken:           "",
+			EnableWeb:            true,
+			HeartbeatSeconds:     5,
+			ClientTimeoutSeconds: 20,
+		},
+		Client: ClientConfig{
+			Name: "",
+			Kind: "DISPLAY",
 		},
 	}
 }

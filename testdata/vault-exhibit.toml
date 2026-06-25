@@ -1,0 +1,83 @@
+# VT-UOS Configuration File
+# Vault-Tec Unified Operating System
+#
+# Interactive-exhibit configuration. Enables the boot sequence, unattended
+# attract (kiosk) mode, accelerated time, and the master server with its web
+# administration console. Deploy one master with `vtuos serve` and any number of
+# display terminals with `vtuos connect <master-address>`.
+
+[vault]
+designation = "Vault 076"
+number = 76
+region = "Appalachia"
+commissioned_date = "2076-10-23"
+sealed_date = "2077-10-23T09:47:00Z"
+designed_capacity = 500
+vault_type = "control"
+
+[vault.location]
+latitude = 39.6295
+longitude = -79.9559
+depth_meters = 100
+
+[overseer]
+initial_overseer_id = ""
+
+[experiment]
+enabled = false
+protocol_id = ""
+protocol_name = ""
+classification = "NONE"
+
+[simulation]
+enabled = true
+# Accelerated so an exhibit visibly progresses: 1 real minute ~= 1 vault day.
+time_scale = 1440.0
+auto_events = true
+event_frequency = "normal"
+start_date = "2077-10-23T09:47:00Z"
+
+[simulation.consumption]
+calorie_variance = 0.1
+water_variance = 0.1
+efficiency_decay_rate = 0.001
+
+[display]
+color_scheme = "green_phosphor"
+scan_lines = true
+flicker = false
+date_format = "2006-01-02"
+time_format = "15:04:05"
+
+[logging]
+level = "info"
+file = "logs/vtuos.log"
+max_size_mb = 10
+max_backups = 5
+
+[database]
+path = "vault.db"
+backup_interval_hours = 24
+backup_retention_days = 30
+
+[exhibit]
+# Presentation features for an unattended exhibit kiosk.
+boot_sequence = true
+attract_mode = true
+attract_idle_seconds = 90
+rotate_seconds = 12
+# Kiosk mode disables the quit confirmation so visitors cannot close the display.
+kiosk = true
+
+[server]
+# Master server: authoritative simulation, JSON/SSE API, and web admin console.
+listen = ":8080"
+admin_token = "change-me-overseer-token"
+enable_web = true
+heartbeat_seconds = 5
+client_timeout_seconds = 20
+
+[client]
+# Defaults applied when this binary runs as `vtuos connect`.
+name = "Atrium Display"
+kind = "DISPLAY"

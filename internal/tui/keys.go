@@ -34,6 +34,7 @@ type KeyMap struct {
 	F8  Key
 	F9  Key
 	F10 Key
+	F11 Key
 
 	// Form navigation
 	Tab      Key
@@ -176,6 +177,11 @@ func DefaultKeyMap() KeyMap {
 			Help:    "Quit",
 			Enabled: true,
 		},
+		F11: Key{
+			Keys:    []string{"f11"},
+			Help:    "Simulation",
+			Enabled: true,
+		},
 
 		// Form navigation
 		Tab: Key{
@@ -252,7 +258,7 @@ func (km KeyMap) IsNavigation(msg tea.KeyMsg) bool {
 // IsFunctionKey checks if the key message is a function key.
 func (km KeyMap) IsFunctionKey(msg tea.KeyMsg) bool {
 	return MatchesAny(msg, km.F1, km.F2, km.F3, km.F4, km.F5,
-		km.F6, km.F7, km.F8, km.F9, km.F10)
+		km.F6, km.F7, km.F8, km.F9, km.F10, km.F11)
 }
 
 // GetFunctionKeyModule returns the module name for a function key.
@@ -278,6 +284,8 @@ func (km KeyMap) GetFunctionKeyModule(msg tea.KeyMsg) string {
 		return "governance"
 	case km.F10.Matches(msg):
 		return "quit"
+	case km.F11.Matches(msg):
+		return "simulation"
 	default:
 		return ""
 	}
@@ -296,6 +304,6 @@ func (km KeyMap) StatusBarHelpResponsive(width int) string {
 	case width < 100:
 		return "[F1]Help [F2]Dashboard [F3]Population [F4]Resources [F10]Quit"
 	default:
-		return "[F1]Help [F2]Dashboard [F3]Population [F4]Resources [F5]Facilities [F6]Labor [F7]Medical [F8]Security [F9]Governance [F10]Quit"
+		return "[F1]Help [F2]Dashboard [F3]Population [F4]Resources [F5]Facilities [F6]Labor [F7]Medical [F8]Security [F9]Governance [F11]Sim [F10]Quit"
 	}
 }

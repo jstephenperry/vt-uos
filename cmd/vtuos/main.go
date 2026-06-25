@@ -8,6 +8,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"io"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -17,6 +18,7 @@ import (
 	"github.com/vtuos/vtuos/internal/config"
 	"github.com/vtuos/vtuos/internal/database"
 	"github.com/vtuos/vtuos/internal/database/seed"
+	"github.com/vtuos/vtuos/internal/simulation"
 	"github.com/vtuos/vtuos/internal/tui"
 	"github.com/vtuos/vtuos/internal/util"
 )
@@ -35,6 +37,7 @@ func main() {
 		seedData    = flag.Bool("seed", false, "Generate seed data")
 		showVersion = flag.Bool("version", false, "Show version and exit")
 		debugMode   = flag.Bool("debug", false, "Enable debug logging")
+		restorePath = flag.String("restore", "", "Restore the vault database from a snapshot file before starting")
 	)
 	flag.Parse()
 
@@ -65,13 +68,13 @@ func main() {
 	}()
 
 	// Run the application
-	if err := run(ctx, *configPath, *migrateOnly, *seedData, *debugMode); err != nil {
+	if err := run(ctx, *configPath, *migrateOnly, *seedData, *debugMode, *restorePath); err != nil {
 		slog.Error("application error", "error", err)
 		os.Exit(1)
 	}
 }
 
-func run(ctx context.Context, configPath string, migrateOnly, seedData, debugMode bool) error {
+func run(ctx context.Context, configPath string, migrateOnly, seedData, debugMode bool, restorePath string) error {
 	// Load configuration
 	cfg, cfgPath, err := config.Load(configPath, true)
 	if err != nil {
@@ -129,6 +132,15 @@ func run(ctx context.Context, configPath string, migrateOnly, seedData, debugMod
 	dbPath, err := config.EnsureDataDir(cfg)
 	if err != nil {
 		return fmt.Errorf("ensuring data directory: %w", err)
+	}
+
+	// Restore from a snapshot before opening, if requested. This is the safe
+	// way to reset an exhibit to a clean baseline.
+	if restorePath != "" {
+		if err := restoreDatabase(restorePath, dbPath); err != nil {
+			return fmt.Errorf("restoring database from snapshot: %w", err)
+		}
+		slog.Info("vault database restored from snapshot", "from", restorePath, "to", dbPath)
 	}
 
 	// Get backup directory
@@ -241,6 +253,20 @@ func run(ctx context.Context, configPath string, migrateOnly, seedData, debugMod
 		clock.Pause()
 	}
 
+	// Start the simulation control core so the local console renders live,
+	// authoritative operational state.
+	engine := simulation.New(db, cfg, clock)
+	if err := engine.Start(ctx); err != nil {
+		slog.Warn("simulation control core failed to start", "error", err)
+	}
+	defer func() {
+		stopCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := engine.Stop(stopCtx); err != nil {
+			slog.Warn("error stopping simulation control core", "error", err)
+		}
+	}()
+
 	// Set version info for TUI
 	tui.Version = Version
 	tui.BuildTime = BuildTime
@@ -251,10 +277,35 @@ func run(ctx context.Context, configPath string, migrateOnly, seedData, debugMod
 		"simulation", cfg.Simulation.Enabled,
 	)
 
-	if err := tui.Run(ctx, db, cfg, clock); err != nil {
+	if err := tui.RunWithEngine(ctx, db, cfg, clock, engine); err != nil {
 		return fmt.Errorf("TUI error: %w", err)
 	}
 
 	slog.Info("VT-UOS shutdown complete")
 	return nil
+}
+
+// restoreDatabase copies a snapshot file over the live database path, removing
+// any stale WAL/SHM sidecar files so the restored database opens cleanly.
+func restoreDatabase(src, dst string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return fmt.Errorf("opening snapshot: %w", err)
+	}
+	defer in.Close()
+
+	for _, sidecar := range []string{dst + "-wal", dst + "-shm"} {
+		_ = os.Remove(sidecar)
+	}
+
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0640)
+	if err != nil {
+		return fmt.Errorf("opening destination: %w", err)
+	}
+	defer out.Close()
+
+	if _, err := io.Copy(out, in); err != nil {
+		return fmt.Errorf("copying snapshot: %w", err)
+	}
+	return out.Sync()
 }
