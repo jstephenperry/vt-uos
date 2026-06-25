@@ -2,7 +2,6 @@
 package resources
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -54,43 +53,36 @@ func NewInventoryView(service *resources.Service) *InventoryView {
 	}
 }
 
-// Load fetches stocks from the database.
-func (v *InventoryView) Load(ctx context.Context) error {
-	v.loading = true
-	v.err = nil
-
-	// Load categories for display
-	if v.categories == nil {
-		cats, err := v.service.ListCategories(ctx)
-		if err == nil {
-			v.categories = cats
-		}
-	}
-
-	// Apply category filter if selected
+// QueryParams returns a snapshot of the current query parameters (with the
+// selected category folded into the filter) plus whether the category list
+// still needs to be fetched. It is called on the UI goroutine.
+func (v *InventoryView) QueryParams() (models.StockFilter, models.Pagination, bool) {
 	filter := v.filter
 	if v.selectedCategory != nil {
 		filter.CategoryID = *v.selectedCategory
 	}
+	return filter, v.page, v.categories == nil
+}
 
-	result, err := v.service.ListStocks(ctx, filter, v.page)
-	if err != nil {
-		v.loading = false
-		v.err = err
-		return err
-	}
-
-	v.stocks = result.Stocks
+// ApplyStocks stores a fetched result and rebuilds the table. When categories
+// are supplied they are cached. It must be called on the UI goroutine.
+func (v *InventoryView) ApplyStocks(categories []*models.ResourceCategory, result *models.StockList) {
 	v.loading = false
+	v.err = nil
+	if categories != nil {
+		v.categories = categories
+	}
+	if result == nil {
+		return
+	}
+	v.stocks = result.Stocks
 
-	// Convert to table rows
 	rows := make([][]string, len(v.stocks))
 	for i, s := range v.stocks {
 		catCode := "-"
 		if s.Item != nil && s.Item.Category != nil {
 			catCode = s.Item.Category.Code
 		} else if s.Item != nil {
-			// Try to find category from our cached list
 			for _, cat := range v.categories {
 				if cat.ID == s.Item.CategoryID {
 					catCode = cat.Code
@@ -135,8 +127,12 @@ func (v *InventoryView) Load(ctx context.Context) error {
 
 	v.table.SetRows(rows)
 	v.table.SetPagination(result.Page, result.TotalPages, result.Total)
+}
 
-	return nil
+// SetLoadError records a failed load for display.
+func (v *InventoryView) SetLoadError(err error) {
+	v.loading = false
+	v.err = err
 }
 
 // SetVaultTime sets the current vault time.

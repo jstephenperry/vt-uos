@@ -2,7 +2,6 @@
 package facilities
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -49,20 +48,22 @@ func NewSystemsView(service *facilities.Service) *SystemsView {
 	}
 }
 
-// Load fetches facility systems from the database.
-func (v *SystemsView) Load(ctx context.Context) error {
-	v.loading = true
-	v.err = nil
+// QueryParams returns a snapshot of the current query parameters. It is called
+// on the UI goroutine so the asynchronous load command can fetch without
+// touching view state concurrently.
+func (v *SystemsView) QueryParams() (models.FacilitySystemFilter, models.Pagination) {
+	return v.filter, v.page
+}
 
-	result, err := v.service.ListSystems(ctx, v.filter, v.page)
-	if err != nil {
-		v.loading = false
-		v.err = err
-		return err
-	}
-
-	v.systems = result.Systems
+// ApplySystems stores a fetched result and rebuilds the table. It must be called
+// on the UI goroutine (from Update), never from a command goroutine.
+func (v *SystemsView) ApplySystems(result *models.FacilitySystemList) {
 	v.loading = false
+	v.err = nil
+	if result == nil {
+		return
+	}
+	v.systems = result.Systems
 
 	rows := make([][]string, len(v.systems))
 	for i, s := range v.systems {
@@ -87,8 +88,12 @@ func (v *SystemsView) Load(ctx context.Context) error {
 
 	v.table.SetRows(rows)
 	v.table.SetPagination(result.Page, result.TotalPages, result.Total)
+}
 
-	return nil
+// SetLoadError records a failed load for display.
+func (v *SystemsView) SetLoadError(err error) {
+	v.loading = false
+	v.err = err
 }
 
 // SetVaultTime sets the current vault time for display.

@@ -253,15 +253,19 @@ type populationMsg struct {
 }
 
 type censusLoadedMsg struct {
-	err error
+	result *models.ResidentList
+	err    error
 }
 
 type inventoryLoadedMsg struct {
-	err error
+	categories []*models.ResourceCategory
+	result     *models.StockList
+	err        error
 }
 
 type systemsLoadedMsg struct {
-	err error
+	result *models.FacilitySystemList
+	err    error
 }
 
 // Update implements tea.Model.
@@ -330,20 +334,31 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return a, nil
 
 	case censusLoadedMsg:
+		// Mutating the view here, on the UI goroutine, keeps it free of the
+		// data race that arose when the load command mutated it directly.
 		if msg.err != nil {
+			a.censusView.SetLoadError(msg.err)
 			a.AddAlert(AlertWarning, "Failed to load census: "+msg.err.Error())
+		} else {
+			a.censusView.ApplyResidents(msg.result)
 		}
 		return a, nil
 
 	case inventoryLoadedMsg:
 		if msg.err != nil {
+			a.inventoryView.SetLoadError(msg.err)
 			a.AddAlert(AlertWarning, "Failed to load inventory: "+msg.err.Error())
+		} else {
+			a.inventoryView.ApplyStocks(msg.categories, msg.result)
 		}
 		return a, nil
 
 	case systemsLoadedMsg:
 		if msg.err != nil {
+			a.systemsView.SetLoadError(msg.err)
 			a.AddAlert(AlertWarning, "Failed to load systems: "+msg.err.Error())
+		} else {
+			a.systemsView.ApplySystems(msg.result)
 		}
 		return a, nil
 
@@ -761,11 +776,15 @@ func (a *App) registerDeath(resident *models.Resident) tea.Cmd {
 	}
 }
 
-// loadCensus loads the census data.
+// loadCensus loads the census data. Query parameters are snapshotted on the UI
+// goroutine; the command performs only a read-only fetch and returns the result
+// for the Update handler to apply to the view.
 func (a *App) loadCensus() tea.Cmd {
+	filter, page := a.censusView.QueryParams()
+	svc := a.populationSvc
 	return func() tea.Msg {
-		err := a.censusView.Load(context.Background())
-		return censusLoadedMsg{err: err}
+		result, err := svc.ListResidents(context.Background(), filter, page)
+		return censusLoadedMsg{result: result, err: err}
 	}
 }
 
@@ -890,19 +909,27 @@ func (a *App) handleFacilityKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
-// loadSystems loads the facility systems data.
+// loadSystems loads the facility systems data (read-only fetch; applied in Update).
 func (a *App) loadSystems() tea.Cmd {
+	filter, page := a.systemsView.QueryParams()
+	svc := a.facilitySvc
 	return func() tea.Msg {
-		err := a.systemsView.Load(context.Background())
-		return systemsLoadedMsg{err: err}
+		result, err := svc.ListSystems(context.Background(), filter, page)
+		return systemsLoadedMsg{result: result, err: err}
 	}
 }
 
-// loadInventory loads the inventory data.
+// loadInventory loads the inventory data (read-only fetch; applied in Update).
 func (a *App) loadInventory() tea.Cmd {
+	filter, page, needCats := a.inventoryView.QueryParams()
+	svc := a.resourceSvc
 	return func() tea.Msg {
-		err := a.inventoryView.Load(context.Background())
-		return inventoryLoadedMsg{err: err}
+		var cats []*models.ResourceCategory
+		if needCats {
+			cats, _ = svc.ListCategories(context.Background())
+		}
+		result, err := svc.ListStocks(context.Background(), filter, page)
+		return inventoryLoadedMsg{categories: cats, result: result, err: err}
 	}
 }
 
