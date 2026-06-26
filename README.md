@@ -80,9 +80,19 @@ make build
 # Run with seed data (first time)
 ./bin/vtuos --seed
 
-# Run normally
+# Run the local operator console
 ./bin/vtuos
+
+# Or run as an interactive-exhibit master server (web console on :8080)
+./bin/vtuos serve --token overseer-secret
+
+# …and connect display terminals to it
+./bin/vtuos connect 127.0.0.1:8080
 ```
+
+See **[docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)** for the master/client topology
+and web console, and **[docs/SIMULATION.md](docs/SIMULATION.md)** for the
+simulation control core.
 
 ### First Launch
 
@@ -100,8 +110,12 @@ On first run, VT-UOS will:
 | `F2` | Dashboard |
 | `F3` | Population Registry |
 | `F4` | Resource Management |
-| `F5` | Facility Operations (coming soon) |
+| `F5` | Facility Operations |
+| `F11` | Simulation Control Core |
 | `F10` | Quit |
+
+In the **Simulation Control** view: `Space` play/pause, `+`/`-` time scale,
+`s` step a day, `h` step an hour, `k` snapshot, `a` acknowledge alerts.
 
 ## 🏗️ Architecture
 
@@ -143,19 +157,21 @@ Comprehensive documentation is available in the [`docs/`](docs/) directory:
 
 - **[DATABASE.md](docs/DATABASE.md)** - Complete SQLite schema with all tables, indexes, and business rules
 - **[MODULES.md](docs/MODULES.md)** - Service specifications, algorithms, and API interfaces
+- **[SIMULATION.md](docs/SIMULATION.md)** - Simulation control core: processing model, incidents, alerts, control API
+- **[DEPLOYMENT.md](docs/DEPLOYMENT.md)** - Local / master-server / client modes, HTTP API, web console, exhibit kiosk
 - **[TUI.md](docs/TUI.md)** - UI design, components, navigation, and key bindings
 - **[CONFIGURATION.md](docs/CONFIGURATION.md)** - Setup, config files, and environment variables
 - **[DEVELOPMENT.md](docs/DEVELOPMENT.md)** - Workflow, testing, build system, and guidelines
 
 ## 🗺️ Roadmap
 
-### Current Status: **Phase 3 Complete** 🎉
+### Current Status: **Phase 5 Complete** 🎉
 
 - [x] **Phase 1**: Foundation (config, database, TUI shell)
 - [x] **Phase 2**: Population module MVP (residents, households, CRUD)
 - [x] **Phase 3**: Resource management (inventory, consumption, rationing)
-- [ ] **Phase 4**: Facility operations (systems, maintenance) ← **In Progress**
-- [ ] **Phase 5**: Simulation engine (time, events, degradation)
+- [x] **Phase 4**: Facility operations (systems, maintenance)
+- [x] **Phase 5**: Simulation control core + master/client deployment + web console
 - [ ] **Phase 6**: Additional modules (labor, medical, security, governance)
 - [ ] **Phase 7**: Polish (dashboard, alerts, optimization)
 

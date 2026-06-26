@@ -135,7 +135,7 @@ func (t *Theme) Panel(title, content string, width int) string {
 	style := lipgloss.NewStyle().
 		Border(lipgloss.RoundedBorder()).
 		BorderForeground(t.SecondaryColor).
-		Width(width - 2). // -2 for border chars
+		Width(width-2). // -2 for border chars
 		Padding(0, 1)
 
 	rendered := style.Render(content)

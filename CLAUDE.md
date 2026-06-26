@@ -155,12 +155,14 @@ make build-linux-arm64
 ## Implementation Phases
 
 - [x] **Phase 1:** Foundation (config, database, TUI shell)
-- [ ] **Phase 2:** Population module MVP (residents, households, CRUD)
-- [ ] **Phase 3:** Resource management (inventory, consumption, rationing)
-- [ ] **Phase 4:** Facility operations (systems, maintenance)
-- [ ] **Phase 5:** Simulation engine (time, events, degradation)
+- [x] **Phase 2:** Population module MVP (residents, households, CRUD)
+- [x] **Phase 3:** Resource management (inventory, consumption, rationing)
+- [x] **Phase 4:** Facility operations (systems, maintenance)
+- [x] **Phase 5:** Simulation control core (time, consumption, degradation, incidents, demographics) + master/client deployment + web console
 - [ ] **Phase 6:** Remaining modules (labor, medical, security, governance)
 - [ ] **Phase 7:** Polish (dashboard, alerts, optimization)
+
+See [docs/SIMULATION.md](docs/SIMULATION.md) and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the control core and client/master-server deployment.
 
 ## Key Design Decisions
 

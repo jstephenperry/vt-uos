@@ -1,16 +1,42 @@
 # VT-UOS Development Progress
 
-**Last Updated:** 2025-12-28
+**Last Updated:** 2026-06-25
 
 ## Current Status
 
-**Phase 3: Resource Management - COMPLETE**
+**Phase 5: Simulation Control Core - COMPLETE**
 
-Ready to begin **Phase 4: Facility Operations**
+The vault now runs as authoritative operations software: a deterministic engine
+advances time and drives real consumption, production, facility degradation,
+maintenance, operational incidents, and demographics against the database. It is
+deployable as a master server with an embedded web administration console and
+managed client display/operator terminals.
+
+- **Simulation control core** (`internal/simulation`) — see [docs/SIMULATION.md](docs/SIMULATION.md)
+- **Master server + web console** (`internal/server`) — see [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md)
+- **Client terminals** (`internal/client`) — `vtuos connect`
+- **Operator surfaces** — Simulation Control view (F11), live-wired dashboard,
+  optional boot/attract/kiosk exhibit mode
 
 ---
 
 ## Completed Phases
+
+### Phase 5: Simulation Control Core ✅
+- Deterministic tick engine: consumption (FIFO), production, expiration,
+  facility degradation, maintenance sweep, weighted operational incidents,
+  demographics (births/deaths)
+- Persistence to `simulation_events` + `audit_log`; power-loss continuity via
+  `vault_metadata`; snapshot (`VACUUM INTO`) + `--restore` reset
+- Self-healing core facility systems (`EnsureCoreSystems`)
+- `protocol.VaultState` snapshot published to TUI, web console, and clients
+- Master server: stdlib `net/http` JSON API, SSE stream, health endpoint,
+  token-gated control, client registry with telemetry + remote operations,
+  embedded `html/template` web console
+- Client terminal: registers, streams/renders live state, reports telemetry,
+  executes remote ops; kiosk lockout + auto-reconnect
+- TUI: Simulation Control view, live dashboard, boot/attract/kiosk exhibit mode
+- Subcommands: `serve`, `connect`, default local console
 
 ### Phase 1: Foundation ✅
 - Configuration loading (TOML)

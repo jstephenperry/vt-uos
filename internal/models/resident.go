@@ -137,10 +137,13 @@ func (r *Resident) FullName() string {
 	return fmt.Sprintf("%s, %s", r.Surname, r.GivenNames)
 }
 
-// Age calculates the resident's age as of the given date.
+// Age calculates the resident's age as of the given date. The birthday check
+// compares calendar month and day (rather than day-of-year) so leap years do
+// not introduce an off-by-one error.
 func (r *Resident) Age(asOf time.Time) int {
 	years := asOf.Year() - r.DateOfBirth.Year()
-	if asOf.YearDay() < r.DateOfBirth.YearDay() {
+	if asOf.Month() < r.DateOfBirth.Month() ||
+		(asOf.Month() == r.DateOfBirth.Month() && asOf.Day() < r.DateOfBirth.Day()) {
 		years--
 	}
 	return years

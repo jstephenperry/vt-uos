@@ -131,12 +131,12 @@ func TestTruncate(t *testing.T) {
 		maxWidth int
 		expected string
 	}{
-		{"hello", 10, "hello"},       // fits
-		{"hello", 5, "hello"},        // exact fit
-		{"hello world", 5, "hell…"},  // truncated
-		{"hi", 0, ""},                // zero width
-		{"hello world", 3, "hel"},    // very short (<=3)
-		{"hello world", 1, "h"},      // single char
+		{"hello", 10, "hello"},      // fits
+		{"hello", 5, "hello"},       // exact fit
+		{"hello world", 5, "hell…"}, // truncated
+		{"hi", 0, ""},               // zero width
+		{"hello world", 3, "hel"},   // very short (<=3)
+		{"hello world", 1, "h"},     // single char
 	}
 
 	for _, tt := range tests {
@@ -154,8 +154,8 @@ func TestPadRight(t *testing.T) {
 		expected string
 	}{
 		{"hi", 5, "hi   "},
-		{"hello", 5, "hello"},     // exact fit
-		{"hello!", 5, "hello!"},   // already wider
+		{"hello", 5, "hello"},   // exact fit
+		{"hello!", 5, "hello!"}, // already wider
 	}
 
 	for _, tt := range tests {
@@ -173,8 +173,8 @@ func TestPadLeft(t *testing.T) {
 		expected string
 	}{
 		{"hi", 5, "   hi"},
-		{"hello", 5, "hello"},     // exact fit
-		{"hello!", 5, "hello!"},   // already wider
+		{"hello", 5, "hello"},   // exact fit
+		{"hello!", 5, "hello!"}, // already wider
 	}
 
 	for _, tt := range tests {
@@ -213,10 +213,10 @@ func TestContentHeight(t *testing.T) {
 		chromeLines int
 		expected    int
 	}{
-		{24, 6, 18},  // normal
-		{40, 6, 34},  // tall terminal
-		{8, 6, 5},    // very short, clamps to 5
-		{5, 6, 5},    // shorter than chrome, clamps to 5
+		{24, 6, 18}, // normal
+		{40, 6, 34}, // tall terminal
+		{8, 6, 5},   // very short, clamps to 5
+		{5, 6, 5},   // shorter than chrome, clamps to 5
 	}
 
 	for _, tt := range tests {

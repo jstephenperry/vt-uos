@@ -11,12 +11,15 @@ import (
 	"github.com/vtuos/vtuos/internal/config"
 	"github.com/vtuos/vtuos/internal/database"
 	"github.com/vtuos/vtuos/internal/models"
+	"github.com/vtuos/vtuos/internal/protocol"
 	"github.com/vtuos/vtuos/internal/services/facilities"
 	"github.com/vtuos/vtuos/internal/services/population"
 	"github.com/vtuos/vtuos/internal/services/resources"
+	"github.com/vtuos/vtuos/internal/simulation"
 	facviews "github.com/vtuos/vtuos/internal/tui/views/facilities"
 	popviews "github.com/vtuos/vtuos/internal/tui/views/population"
 	resviews "github.com/vtuos/vtuos/internal/tui/views/resources"
+	simviews "github.com/vtuos/vtuos/internal/tui/views/simulation"
 	"github.com/vtuos/vtuos/internal/util"
 )
 
@@ -41,9 +44,16 @@ const (
 	ModuleMedical    Module = "medical"
 	ModuleSecurity   Module = "security"
 	ModuleGovernance Module = "governance"
+	ModuleSimulation Module = "simulation"
 	ModuleSettings   Module = "settings"
 	ModuleHelp       Module = "help"
 )
+
+// attractRotation is the sequence of modules cycled through in attract mode.
+var attractRotation = []Module{
+	ModuleDashboard, ModuleSimulation, ModulePopulation, ModuleResources,
+	ModuleFacilities, ModuleLabor, ModuleMedical, ModuleSecurity, ModuleGovernance,
+}
 
 // App is the main Bubble Tea application model.
 type App struct {
@@ -57,11 +67,16 @@ type App struct {
 	resourceSvc   *resources.Service
 	facilitySvc   *facilities.Service
 
+	// Simulation control core (optional; live data when attached)
+	engine *simulation.Engine
+	live   protocol.VaultState
+
 	// Views
 	censusView    *popviews.CensusView
 	residentForm  *popviews.ResidentForm
 	inventoryView *resviews.InventoryView
 	systemsView   *facviews.SystemsView
+	simView       *simviews.ControlView
 
 	// UI state
 	theme       *Theme
@@ -80,13 +95,26 @@ type App struct {
 	searchMode     bool // Search input mode
 	searchInput    string
 
-	// Alerts
-	alerts     []Alert
-	alertIndex int
-	alertTick  int
+	// Alerts. The displayed list (alerts) is rebuilt from two sources: alerts
+	// the UI raises directly (userAlerts, e.g. action confirmations) and alerts
+	// derived from the control core's live state (engineAlerts). Keeping them
+	// separate means live syncing never discards operator feedback.
+	alerts       []Alert
+	userAlerts   []Alert
+	engineAlerts []Alert
+	alertIndex   int
+	alertTick    int
 
 	// Population count (updated periodically)
 	population int
+
+	// Exhibit presentation state
+	booting       bool
+	bootStart     time.Time
+	kiosk         bool
+	attractActive bool
+	lastInputAt   time.Time
+	attractAt     time.Time
 }
 
 // Alert represents a system alert.
@@ -131,6 +159,7 @@ func New(db *database.DB, cfg *config.Config, clock *util.VaultClock) *App {
 	systemsView := facviews.NewSystemsView(facSvc)
 	systemsView.SetVaultTime(clock.Now())
 
+	now := time.Now()
 	return &App{
 		db:            db,
 		config:        cfg,
@@ -141,20 +170,44 @@ func New(db *database.DB, cfg *config.Config, clock *util.VaultClock) *App {
 		censusView:    censusView,
 		inventoryView: inventoryView,
 		systemsView:   systemsView,
+		simView:       simviews.NewControlView(),
 		theme:         NewTheme(cfg.Display.ColorScheme),
 		keys:          DefaultKeyMap(),
 		currentModule: ModuleDashboard,
 		alerts:        []Alert{},
+		booting:       cfg.Exhibit.BootSequence,
+		bootStart:     now,
+		kiosk:         cfg.Exhibit.Kiosk,
+		lastInputAt:   now,
+		attractAt:     now,
 	}
 }
 
+// AttachEngine binds a running simulation control core to the application so the
+// dashboard and simulation views render live operational state. When no engine
+// is attached the views fall back to static summaries.
+func (a *App) AttachEngine(e *simulation.Engine) {
+	a.engine = e
+	if e != nil {
+		a.live = e.Snapshot()
+	}
+}
+
+// bootDuration is how long the startup boot sequence plays before auto-continuing.
+const bootDuration = 3500 * time.Millisecond
+
 // Init implements tea.Model.
 func (a *App) Init() tea.Cmd {
-	return tea.Batch(
+	cmds := []tea.Cmd{
 		tea.EnterAltScreen,
 		tickCmd(),
 		a.loadPopulation(),
-	)
+	}
+	if a.booting {
+		a.bootStart = time.Now()
+		cmds = append(cmds, bootTickCmd())
+	}
+	return tea.Batch(cmds...)
 }
 
 // tickCmd returns a command that sends tick messages.
@@ -162,6 +215,22 @@ func tickCmd() tea.Cmd {
 	return tea.Tick(time.Second, func(t time.Time) tea.Msg {
 		return tickMsg(t)
 	})
+}
+
+// bootTickCmd drives the boot sequence animation while booting.
+func bootTickCmd() tea.Cmd {
+	return tea.Tick(150*time.Millisecond, func(t time.Time) tea.Msg {
+		return bootTickMsg{}
+	})
+}
+
+type bootTickMsg struct{}
+
+type simSteppedMsg struct{ err error }
+
+type snapshotMsg struct {
+	path string
+	err  error
 }
 
 // loadPopulation loads the population count from the database.
@@ -184,15 +253,19 @@ type populationMsg struct {
 }
 
 type censusLoadedMsg struct {
-	err error
+	result *models.ResidentList
+	err    error
 }
 
 type inventoryLoadedMsg struct {
-	err error
+	categories []*models.ResourceCategory
+	result     *models.StockList
+	err        error
 }
 
 type systemsLoadedMsg struct {
-	err error
+	result *models.FacilitySystemList
+	err    error
 }
 
 // Update implements tea.Model.
@@ -214,6 +287,12 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		a.censusView.SetVaultTime(a.clock.Now())
 		a.inventoryView.SetVaultTime(a.clock.Now())
 		a.systemsView.SetVaultTime(a.clock.Now())
+		// Refresh live operational state from the control core.
+		if a.engine != nil {
+			a.live = a.engine.Snapshot()
+			a.syncAlertsFromEngine()
+		}
+		a.updateAttract()
 		// Rotate alerts every 3 ticks
 		a.alertTick++
 		if a.alertTick >= 3 && len(a.alerts) > 1 {
@@ -222,25 +301,64 @@ func (a *App) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return a, tickCmd()
 
+	case bootTickMsg:
+		if !a.booting {
+			return a, nil
+		}
+		if time.Since(a.bootStart) >= bootDuration {
+			a.booting = false
+			return a, nil
+		}
+		return a, bootTickCmd()
+
+	case simSteppedMsg:
+		if a.engine != nil {
+			a.live = a.engine.Snapshot()
+			a.syncAlertsFromEngine()
+		}
+		if msg.err != nil {
+			a.AddAlert(AlertWarning, "Simulation step failed: "+msg.err.Error())
+		}
+		return a, a.loadPopulation()
+
+	case snapshotMsg:
+		if msg.err != nil {
+			a.AddAlert(AlertWarning, "Snapshot failed: "+msg.err.Error())
+		} else {
+			a.AddAlert(AlertInfo, "Vault snapshot saved: "+msg.path)
+		}
+		return a, nil
+
 	case populationMsg:
 		a.population = msg.count
 		return a, nil
 
 	case censusLoadedMsg:
+		// Mutating the view here, on the UI goroutine, keeps it free of the
+		// data race that arose when the load command mutated it directly.
 		if msg.err != nil {
+			a.censusView.SetLoadError(msg.err)
 			a.AddAlert(AlertWarning, "Failed to load census: "+msg.err.Error())
+		} else {
+			a.censusView.ApplyResidents(msg.result)
 		}
 		return a, nil
 
 	case inventoryLoadedMsg:
 		if msg.err != nil {
+			a.inventoryView.SetLoadError(msg.err)
 			a.AddAlert(AlertWarning, "Failed to load inventory: "+msg.err.Error())
+		} else {
+			a.inventoryView.ApplyStocks(msg.categories, msg.result)
 		}
 		return a, nil
 
 	case systemsLoadedMsg:
 		if msg.err != nil {
+			a.systemsView.SetLoadError(msg.err)
 			a.AddAlert(AlertWarning, "Failed to load systems: "+msg.err.Error())
+		} else {
+			a.systemsView.ApplySystems(msg.result)
 		}
 		return a, nil
 
@@ -294,6 +412,18 @@ func (a *App) updateViewDimensions() {
 
 // handleKeyPress processes key press events.
 func (a *App) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// Any key press is operator activity: dismiss the boot screen and exit
+	// attract (kiosk) mode without acting on the key itself.
+	a.lastInputAt = time.Now()
+	if a.booting {
+		a.booting = false
+		return a, nil
+	}
+	if a.attractActive {
+		a.attractActive = false
+		return a, nil
+	}
+
 	// Handle quit confirmation first (modal takes priority)
 	if a.showConfirm {
 		switch msg.String() {
@@ -319,6 +449,12 @@ func (a *App) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	// Global key bindings (only when not in input mode)
 	if a.keys.IsQuit(msg) {
+		// In kiosk mode the exhibit cannot be closed by visitors; only an
+		// operator at the console (Ctrl+C) may exit.
+		if a.kiosk && msg.String() != "ctrl+c" {
+			a.AddAlert(AlertInfo, "Kiosk mode active — exit is disabled")
+			return a, nil
+		}
 		a.showConfirm = true
 		return a, nil
 	}
@@ -328,7 +464,12 @@ func (a *App) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		module := a.keys.GetFunctionKeyModule(msg)
 		switch module {
 		case "quit":
-			a.showConfirm = true
+			if !a.kiosk {
+				a.showConfirm = true
+			}
+		case "simulation":
+			a.currentModule = ModuleSimulation
+			a.showDetail = false
 		case "help":
 			a.previousModule = a.currentModule
 			a.currentModule = ModuleHelp
@@ -385,7 +526,93 @@ func (a *App) handleKeyPress(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		return a.handleFacilityKeys(msg)
 	}
 
+	if a.currentModule == ModuleSimulation {
+		return a.handleSimulationKeys(msg)
+	}
+
 	return a, nil
+}
+
+// handleSimulationKeys routes operator controls to the simulation control core.
+func (a *App) handleSimulationKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
+	if a.engine == nil {
+		return a, nil
+	}
+	switch msg.String() {
+	case " ", "p":
+		if a.engine.Status() == protocol.SimRunning {
+			a.engine.Pause()
+		} else {
+			a.engine.Resume()
+		}
+		a.live = a.engine.Snapshot()
+	case "+", "=":
+		_ = a.engine.SetTimeScale(nextScaleUp(a.clock.TimeScale()))
+		a.live = a.engine.Snapshot()
+	case "-", "_":
+		_ = a.engine.SetTimeScale(nextScaleDown(a.clock.TimeScale()))
+		a.live = a.engine.Snapshot()
+	case "s":
+		return a, a.stepSim(24)
+	case "h":
+		return a, a.stepSim(1)
+	case "k":
+		return a, a.snapshotSim()
+	case "a":
+		for _, al := range a.live.Alerts {
+			a.engine.AcknowledgeAlert(al.Code)
+		}
+		a.live = a.engine.Snapshot()
+		a.syncAlertsFromEngine()
+	}
+	return a, nil
+}
+
+// stepSim advances the simulation by the given number of hours off the UI
+// goroutine and reports completion. The engine reference is captured on the UI
+// goroutine so the background closure does not read the mutable a.engine field.
+func (a *App) stepSim(hours int) tea.Cmd {
+	engine := a.engine
+	return func() tea.Msg {
+		if engine == nil {
+			return simSteppedMsg{}
+		}
+		err := engine.Step(context.Background(), hours)
+		return simSteppedMsg{err: err}
+	}
+}
+
+// snapshotSim captures a vault snapshot off the UI goroutine.
+func (a *App) snapshotSim() tea.Cmd {
+	engine := a.engine
+	return func() tea.Msg {
+		if engine == nil {
+			return snapshotMsg{err: fmt.Errorf("no simulation core attached")}
+		}
+		path, err := engine.CreateSnapshot(context.Background())
+		return snapshotMsg{path: path, err: err}
+	}
+}
+
+// scaleLadder is the set of time scales cycled through with +/- in the control view.
+var scaleLadder = []float64{1, 60, 600, 1440, 3600, 14400, 86400}
+
+func nextScaleUp(cur float64) float64 {
+	for _, s := range scaleLadder {
+		if s > cur+0.001 {
+			return s
+		}
+	}
+	return scaleLadder[len(scaleLadder)-1]
+}
+
+func nextScaleDown(cur float64) float64 {
+	for i := len(scaleLadder) - 1; i >= 0; i-- {
+		if scaleLadder[i] < cur-0.001 {
+			return scaleLadder[i]
+		}
+	}
+	return scaleLadder[0]
 }
 
 // handlePopulationKeys handles key presses in the population module.
@@ -549,11 +776,15 @@ func (a *App) registerDeath(resident *models.Resident) tea.Cmd {
 	}
 }
 
-// loadCensus loads the census data.
+// loadCensus loads the census data. Query parameters are snapshotted on the UI
+// goroutine; the command performs only a read-only fetch and returns the result
+// for the Update handler to apply to the view.
 func (a *App) loadCensus() tea.Cmd {
+	filter, page := a.censusView.QueryParams()
+	svc := a.populationSvc
 	return func() tea.Msg {
-		err := a.censusView.Load(context.Background())
-		return censusLoadedMsg{err: err}
+		result, err := svc.ListResidents(context.Background(), filter, page)
+		return censusLoadedMsg{result: result, err: err}
 	}
 }
 
@@ -678,19 +909,27 @@ func (a *App) handleFacilityKeys(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return a, nil
 }
 
-// loadSystems loads the facility systems data.
+// loadSystems loads the facility systems data (read-only fetch; applied in Update).
 func (a *App) loadSystems() tea.Cmd {
+	filter, page := a.systemsView.QueryParams()
+	svc := a.facilitySvc
 	return func() tea.Msg {
-		err := a.systemsView.Load(context.Background())
-		return systemsLoadedMsg{err: err}
+		result, err := svc.ListSystems(context.Background(), filter, page)
+		return systemsLoadedMsg{result: result, err: err}
 	}
 }
 
-// loadInventory loads the inventory data.
+// loadInventory loads the inventory data (read-only fetch; applied in Update).
 func (a *App) loadInventory() tea.Cmd {
+	filter, page, needCats := a.inventoryView.QueryParams()
+	svc := a.resourceSvc
 	return func() tea.Msg {
-		err := a.inventoryView.Load(context.Background())
-		return inventoryLoadedMsg{err: err}
+		var cats []*models.ResourceCategory
+		if needCats {
+			cats, _ = svc.ListCategories(context.Background())
+		}
+		result, err := svc.ListStocks(context.Background(), filter, page)
+		return inventoryLoadedMsg{categories: cats, result: result, err: err}
 	}
 }
 
@@ -702,6 +941,10 @@ func (a *App) View() string {
 
 	if a.quitting {
 		return a.theme.Title.Render("Vault-Tec Unified Operating System shutting down...")
+	}
+
+	if a.booting {
+		return a.renderBoot()
 	}
 
 	var b strings.Builder
@@ -851,6 +1094,8 @@ func (a *App) getModuleContent() string {
 		return a.renderSecurity()
 	case ModuleGovernance:
 		return a.renderGovernance()
+	case ModuleSimulation:
+		return a.renderSimulation()
 	case ModuleHelp:
 		return a.renderHelp()
 	default:
@@ -942,10 +1187,16 @@ func (a *App) renderPopulationPanel(totalWidth int, bp LayoutBreakpoint) string 
 	b.WriteString("\n")
 
 	capacity := a.config.Vault.DesignedCapacity
-	ratio := float64(a.population) / float64(capacity)
+	active := a.activePopulation()
+	ratio := float64(active) / float64(capacity)
 
-	b.WriteString(fmt.Sprintf("  Active:   %s\n", a.theme.Value.Render(fmt.Sprintf("%d", a.population))))
+	b.WriteString(fmt.Sprintf("  Active:   %s\n", a.theme.Value.Render(fmt.Sprintf("%d", active))))
 	b.WriteString(fmt.Sprintf("  Capacity: %s\n", a.theme.Muted.Render(fmt.Sprintf("%d", capacity))))
+	if a.hasLive() {
+		b.WriteString(fmt.Sprintf("  Births:   %s   Deaths: %s\n",
+			a.theme.Success.Render(fmt.Sprintf("%d", a.live.Population.Births)),
+			a.theme.Error.Render(fmt.Sprintf("%d", a.live.Population.Deaths))))
+	}
 
 	// Population bar
 	barWidth := totalWidth/2 - 4
@@ -959,7 +1210,7 @@ func (a *App) renderPopulationPanel(totalWidth int, bp LayoutBreakpoint) string 
 		barWidth = 10
 	}
 	b.WriteString("  ")
-	b.WriteString(a.theme.ProgressBar(float64(a.population), float64(capacity), barWidth))
+	b.WriteString(a.theme.ProgressBar(float64(active), float64(capacity), barWidth))
 	pctStr := fmt.Sprintf(" %.0f%%", ratio*100)
 	b.WriteString(a.theme.Muted.Render(pctStr))
 	b.WriteString("\n")
@@ -973,20 +1224,37 @@ func (a *App) renderSystemsPanel(totalWidth int, bp LayoutBreakpoint) string {
 	b.WriteString(a.theme.Subtitle.Render("CRITICAL SYSTEMS"))
 	b.WriteString("\n")
 
-	systems := []struct {
-		name   string
-		status string
-		pct    float64
-	}{
-		{"Power", "OPERATIONAL", 0.98},
-		{"Water", "OPERATIONAL", 0.95},
-		{"HVAC", "OPERATIONAL", 0.92},
-		{"Security", "OPERATIONAL", 1.0},
-	}
-
 	barWidth := 16
 	if bp == BreakpointNarrow {
 		barWidth = 10
+	}
+
+	type sysRow struct {
+		name   string
+		status string
+		pct    float64
+	}
+	var systems []sysRow
+
+	if a.hasLive() {
+		for _, s := range a.live.SystemList {
+			if !s.Critical {
+				continue
+			}
+			systems = append(systems, sysRow{name: shortSystemName(s.Name), status: s.Status, pct: s.Efficiency / 100.0})
+			if len(systems) >= 5 {
+				break
+			}
+		}
+	}
+	if len(systems) == 0 {
+		// Fallback summary when no live core is attached.
+		systems = []sysRow{
+			{"Power", "OPERATIONAL", 0.98},
+			{"Water", "OPERATIONAL", 0.95},
+			{"HVAC", "OPERATIONAL", 0.92},
+			{"Security", "OPERATIONAL", 1.0},
+		}
 	}
 
 	for _, sys := range systems {
@@ -998,7 +1266,7 @@ func (a *App) renderSystemsPanel(totalWidth int, bp LayoutBreakpoint) string {
 			statusStyle = a.theme.Error
 		}
 
-		line := fmt.Sprintf("  %-10s", sys.name)
+		line := fmt.Sprintf("  %-12s", sys.name)
 		b.WriteString(a.theme.Base.Render(line))
 		b.WriteString(a.theme.ProgressBar(sys.pct, 1.0, barWidth))
 		b.WriteString(" ")
@@ -1009,34 +1277,60 @@ func (a *App) renderSystemsPanel(totalWidth int, bp LayoutBreakpoint) string {
 	return b.String()
 }
 
+// shortSystemName trims a system name to fit the dashboard column.
+func shortSystemName(name string) string {
+	if len(name) <= 12 {
+		return name
+	}
+	return name[:11] + "…"
+}
+
 // renderResourcesPanel renders resource status for the dashboard.
 func (a *App) renderResourcesPanel(totalWidth int, bp LayoutBreakpoint) string {
 	var b strings.Builder
 	b.WriteString(a.theme.Subtitle.Render("RESOURCE STATUS"))
 	b.WriteString("\n")
 
-	// Placeholder resource data (would come from service in production)
-	resourceStats := []struct {
-		name    string
-		pct     float64
-		runway  int
-	}{
-		{"Food", 0.72, 180},
-		{"Water", 0.85, 240},
-		{"Medical", 0.60, 120},
-		{"Power", 0.90, 365},
-	}
-
 	barWidth := 16
 	if bp == BreakpointNarrow {
 		barWidth = 10
 	}
 
+	type resRow struct {
+		name   string
+		pct    float64
+		runway int
+	}
+	var resourceStats []resRow
+
+	if a.hasLive() {
+		for _, r := range a.live.Resources {
+			if r.DailyUse <= 0 {
+				continue
+			}
+			resourceStats = append(resourceStats, resRow{name: r.Label, pct: r.FillFraction, runway: r.RunwayDays})
+			if len(resourceStats) >= 5 {
+				break
+			}
+		}
+	}
+	if len(resourceStats) == 0 {
+		resourceStats = []resRow{
+			{"Food", 0.72, 180},
+			{"Water", 0.85, 240},
+			{"Medical", 0.60, 120},
+			{"Power", 0.90, 365},
+		}
+	}
+
 	for _, res := range resourceStats {
-		line := fmt.Sprintf("  %-10s", res.name)
+		line := fmt.Sprintf("  %-12s", shortSystemName(res.name))
 		b.WriteString(a.theme.Base.Render(line))
 		b.WriteString(a.theme.ProgressBar(res.pct, 1.0, barWidth))
-		runway := fmt.Sprintf(" %dd", res.runway)
+		runway := "  ∞"
+		if res.runway >= 0 {
+			runway = fmt.Sprintf(" %dd", res.runway)
+		}
 		b.WriteString(a.theme.Muted.Render(runway))
 		b.WriteString("\n")
 	}
@@ -1062,6 +1356,16 @@ func (a *App) renderSimulationPanel(totalWidth int, bp LayoutBreakpoint) string 
 		status = "PAUSED"
 		statusStyle = a.theme.Warning
 	}
+	if a.hasLive() {
+		switch a.live.Status {
+		case protocol.SimRunning:
+			status, statusStyle = "RUNNING", a.theme.Success
+		case protocol.SimPaused:
+			status, statusStyle = "PAUSED", a.theme.Warning
+		default:
+			status, statusStyle = "STOPPED", a.theme.Muted
+		}
+	}
 
 	vaultTime := a.clock.Now()
 	sealDate, err := a.config.Simulation.StartDateTime()
@@ -1076,8 +1380,34 @@ func (a *App) renderSimulationPanel(totalWidth int, bp LayoutBreakpoint) string 
 	b.WriteString(fmt.Sprintf("  Time Scale: %s\n", a.theme.Value.Render(fmt.Sprintf("%.0fx", a.clock.TimeScale()))))
 	b.WriteString(fmt.Sprintf("  Vault Time: %s\n", a.theme.Value.Render(vaultTime.Format("2006-01-02 15:04"))))
 	b.WriteString(fmt.Sprintf("  Elapsed:    %s\n", a.theme.Value.Render(fmt.Sprintf("%d years, %d days", years, days))))
+	if a.hasLive() {
+		balStyle := a.theme.Success
+		if a.live.Power.BalanceKW < 0 {
+			balStyle = a.theme.Error
+		} else if a.live.Power.ReservePct < 10 {
+			balStyle = a.theme.Warning
+		}
+		b.WriteString(fmt.Sprintf("  Power Bal:  %s\n", balStyle.Render(fmt.Sprintf("%+.0f kW (%.0f%%)", a.live.Power.BalanceKW, a.live.Power.ReservePct))))
+		b.WriteString(fmt.Sprintf("  Ticks:      %s\n", a.theme.Value.Render(fmt.Sprintf("%d", a.live.TickCount))))
+		b.WriteString(a.theme.Muted.Render("  [F11] open control core"))
+		b.WriteString("\n")
+	}
 
 	return b.String()
+}
+
+// hasLive reports whether a live operational snapshot is available.
+func (a *App) hasLive() bool {
+	return a.engine != nil && a.live.SchemaVersion != ""
+}
+
+// activePopulation returns the authoritative active population: the live count
+// when a control core is attached, otherwise the periodically-loaded count.
+func (a *App) activePopulation() int {
+	if a.hasLive() {
+		return a.live.Population.Active
+	}
+	return a.population
 }
 
 // renderSideBySide renders two panels side by side, falling back to vertical stack.
@@ -1412,6 +1742,7 @@ func (a *App) renderHelp() string {
 		{"F7", "Medical Records"},
 		{"F8", "Security"},
 		{"F9", "Governance"},
+		{"F11", "Simulation Control"},
 		{"F10", "Quit"},
 	}
 
@@ -1515,38 +1846,183 @@ func (a *App) renderFooter() string {
 	// Draw separator
 	separator := a.theme.DrawHorizontalLine(a.width)
 
+	if a.attractActive {
+		return separator + "\n" + a.theme.Accent.Render("  ATTRACT MODE — press any key to take control")
+	}
+
 	// Help text adapts to width
 	help := a.keys.StatusBarHelpResponsive(a.width)
 
 	return separator + "\n" + a.theme.Footer.Render(help)
 }
 
-// AddAlert adds a new alert to the display.
+// AddAlert raises a UI alert (e.g. an action confirmation or warning).
 func (a *App) AddAlert(level AlertLevel, message string) {
-	a.alerts = append([]Alert{{
+	a.userAlerts = append([]Alert{{
 		Level:   level,
 		Message: message,
 		Time:    time.Now(),
-	}}, a.alerts...)
+	}}, a.userAlerts...)
 
-	// Keep only last 10 alerts
-	if len(a.alerts) > 10 {
-		a.alerts = a.alerts[:10]
+	// Keep only the most recent user alerts.
+	if len(a.userAlerts) > 10 {
+		a.userAlerts = a.userAlerts[:10]
 	}
 
-	// Reset alert rotation to show new alert
+	a.rebuildAlerts()
+	a.alertIndex = 0 // surface the new alert immediately
+}
+
+// ClearAlerts removes all alerts (both UI and engine-derived).
+func (a *App) ClearAlerts() {
+	a.userAlerts = nil
+	a.engineAlerts = nil
+	a.alerts = nil
 	a.alertIndex = 0
 }
 
-// ClearAlerts removes all alerts.
-func (a *App) ClearAlerts() {
-	a.alerts = []Alert{}
-	a.alertIndex = 0
+// rebuildAlerts recomputes the displayed alert list from the two sources,
+// UI-raised alerts first.
+func (a *App) rebuildAlerts() {
+	a.alerts = append(append([]Alert{}, a.userAlerts...), a.engineAlerts...)
+	if a.alertIndex >= len(a.alerts) {
+		a.alertIndex = 0
+	}
+}
+
+// renderSimulation renders the simulation control core console.
+func (a *App) renderSimulation() string {
+	if a.engine == nil {
+		var b strings.Builder
+		b.WriteString(a.theme.Title.Render("═══ SIMULATION CONTROL CORE ═══"))
+		b.WriteString("\n\n")
+		b.WriteString(a.theme.Muted.Render("  The simulation control core is not attached in this mode."))
+		b.WriteString("\n")
+		b.WriteString(a.theme.Muted.Render("  Run the local console or master server to drive vault operations."))
+		return b.String()
+	}
+	h := ContentHeight(a.height, chromeLines)
+	return a.simView.Render(themeStyler{a.theme}, a.live, a.engine.Events(12), a.engine.Alerts(), a.width, h)
+}
+
+// syncAlertsFromEngine mirrors the control core's active alerts into the header
+// alert bar so operational conditions surface across every view.
+func (a *App) syncAlertsFromEngine() {
+	var out []Alert
+	for _, al := range a.live.Alerts {
+		if al.Acknowledged {
+			continue
+		}
+		level := AlertInfo
+		switch al.Level {
+		case protocol.AlertCritical:
+			level = AlertCritical
+		case protocol.AlertWarning:
+			level = AlertWarning
+		}
+		out = append(out, Alert{Level: level, Message: al.Message, Time: al.Raised})
+	}
+	a.engineAlerts = out
+	a.rebuildAlerts()
+}
+
+// updateAttract engages or advances unattended attract (kiosk) mode based on
+// operator idle time.
+func (a *App) updateAttract() {
+	if a.booting || !a.config.Exhibit.AttractMode {
+		return
+	}
+	idle := time.Duration(a.config.Exhibit.AttractIdleSeconds) * time.Second
+	if idle <= 0 {
+		idle = 120 * time.Second
+	}
+	if !a.attractActive {
+		if time.Since(a.lastInputAt) >= idle {
+			a.attractActive = true
+			a.attractAt = time.Now()
+			a.currentModule = ModuleDashboard
+			a.showDetail = false
+		}
+		return
+	}
+	rotate := time.Duration(a.config.Exhibit.RotateSeconds) * time.Second
+	if rotate <= 0 {
+		rotate = 12 * time.Second
+	}
+	if time.Since(a.attractAt) >= rotate {
+		a.attractAt = time.Now()
+		a.currentModule = nextAttractModule(a.currentModule)
+		a.showDetail = false
+	}
+}
+
+func nextAttractModule(cur Module) Module {
+	for i, m := range attractRotation {
+		if m == cur {
+			return attractRotation[(i+1)%len(attractRotation)]
+		}
+	}
+	return attractRotation[0]
+}
+
+// renderBoot renders a RobCo-style startup sequence that reveals progressively.
+func (a *App) renderBoot() string {
+	lines := []string{
+		"ROBCO INDUSTRIES (TM) TERMLINK PROTOCOL",
+		"VAULT-TEC UNIFIED OPERATING SYSTEM " + Version,
+		"COPYRIGHT 2075-2077 VAULT-TEC CORP.",
+		"",
+		"> ESTABLISH UPLINK..................... OK",
+		"> MOUNT VAULT DATABASE................. OK",
+		"> VERIFY SCHEMA INTEGRITY............. OK",
+		"> LOAD POPULATION REGISTRY............ OK",
+		"> CALIBRATE LIFE SUPPORT MONITORS.... OK",
+		"> SPIN UP SIMULATION CONTROL CORE.... ONLINE",
+		"",
+		"VAULT OPERATIONS NOMINAL. WELCOME, OVERSEER.",
+	}
+
+	revealInterval := 220 * time.Millisecond
+	revealed := int(time.Since(a.bootStart)/revealInterval) + 1
+	if revealed > len(lines) {
+		revealed = len(lines)
+	}
+
+	var b strings.Builder
+	b.WriteString("\n\n")
+	for i := 0; i < revealed; i++ {
+		line := lines[i]
+		switch {
+		case strings.HasSuffix(line, "OK"):
+			b.WriteString("  " + a.theme.Success.Render(line))
+		case strings.HasSuffix(line, "ONLINE"):
+			b.WriteString("  " + a.theme.Accent.Render(line))
+		case i < 3:
+			b.WriteString("  " + a.theme.Primary.Render(line))
+		default:
+			b.WriteString("  " + a.theme.Base.Render(line))
+		}
+		b.WriteString("\n")
+	}
+	if revealed >= len(lines) {
+		b.WriteString("\n  " + a.theme.Muted.Render("PRESS ANY KEY TO CONTINUE") + a.theme.Accent.Render(" █"))
+	}
+
+	// Center vertically within the available height.
+	style := lipgloss.NewStyle().Width(a.width).Height(a.height).Align(lipgloss.Left, lipgloss.Center)
+	return style.Render(b.String())
 }
 
 // Run starts the TUI application.
 func Run(ctx context.Context, db *database.DB, cfg *config.Config, clock *util.VaultClock) error {
+	return RunWithEngine(ctx, db, cfg, clock, nil)
+}
+
+// RunWithEngine starts the TUI application with an attached simulation control
+// core so views render live operational state.
+func RunWithEngine(ctx context.Context, db *database.DB, cfg *config.Config, clock *util.VaultClock, engine *simulation.Engine) error {
 	app := New(db, cfg, clock)
+	app.AttachEngine(engine)
 
 	p := tea.NewProgram(app, tea.WithAltScreen())
 

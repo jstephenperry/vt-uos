@@ -2,7 +2,6 @@
 package population
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -53,25 +52,25 @@ func NewCensusView(service *population.Service) *CensusView {
 	}
 }
 
-// Load fetches residents from the database.
-func (v *CensusView) Load(ctx context.Context) error {
-	v.loading = true
-	v.err = nil
+// QueryParams returns a snapshot of the current query parameters. It is called
+// on the UI goroutine so the asynchronous load command can fetch without
+// touching view state concurrently.
+func (v *CensusView) QueryParams() (models.ResidentFilter, models.Pagination) {
+	return v.filter, v.page
+}
 
-	result, err := v.service.ListResidents(ctx, v.filter, v.page)
-	if err != nil {
-		v.loading = false
-		v.err = err
-		return err
-	}
-
-	v.residents = result.Residents
+// ApplyResidents stores a fetched result and rebuilds the table. It must be
+// called on the UI goroutine (from Update), never from a command goroutine.
+func (v *CensusView) ApplyResidents(result *models.ResidentList) {
 	v.loading = false
+	v.err = nil
+	if result == nil {
+		return
+	}
+	v.residents = result.Residents
 
-	// Convert to table rows
 	rows := make([][]string, len(v.residents))
 	for i, r := range v.residents {
-		age := r.Age(v.vaultTime)
 		blood := string(r.BloodType)
 		if blood == "" {
 			blood = "-"
@@ -80,7 +79,7 @@ func (v *CensusView) Load(ctx context.Context) error {
 			r.RegistryNumber,
 			r.Surname,
 			r.GivenNames,
-			fmt.Sprintf("%d", age),
+			fmt.Sprintf("%d", r.Age(v.vaultTime)),
 			string(r.Sex),
 			blood,
 			string(r.Status),
@@ -91,8 +90,12 @@ func (v *CensusView) Load(ctx context.Context) error {
 
 	v.table.SetRows(rows)
 	v.table.SetPagination(result.Page, result.TotalPages, result.Total)
+}
 
-	return nil
+// SetLoadError records a failed load for display.
+func (v *CensusView) SetLoadError(err error) {
+	v.loading = false
+	v.err = err
 }
 
 // SetVaultTime sets the current vault time for age calculation.
