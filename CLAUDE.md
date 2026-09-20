@@ -14,17 +14,24 @@ VT-UOS is a realistic vault population management and operations system inspired
 
 ## Quick Reference
 
-- **[Database Schema](docs/DATABASE.md)** - Complete SQLite schema definitions
-- **[Module Specifications](docs/MODULES.md)** - Service APIs and business logic
-- **[TUI Design](docs/TUI.md)** - Interface design, components, navigation
-- **[Configuration](docs/CONFIGURATION.md)** - Setup, config files, environment
-- **[Development Guide](docs/DEVELOPMENT.md)** - Workflow, testing, implementation
+- **[Architecture](docs/ARCHITECTURE.md)** - Layers, process model, data flow as wired
+- **[CLI](docs/CLI.md)** - `vtuos`, `vtuos serve`, `vtuos connect`: flags, exit codes, startup
+- **[Configuration](docs/CONFIGURATION.md)** - Every TOML key, defaults, validation, search order
+- **[Database Schema](docs/DATABASE.md)** - Schema from the migrations, PRAGMAs, recovery
+- **[Module Specifications](docs/MODULES.md)** - Population, Resources, Facilities services
+- **[Simulation](docs/SIMULATION.md)** - Tick pipeline, incidents, alerts, persistence, control API
+- **[API](docs/API.md)** - HTTP routes, auth, SSE stream, client protocol
+- **[Deployment](docs/DEPLOYMENT.md)** - Local / master / client modes, tokens, kiosk
+- **[TUI Design](docs/TUI.md)** - Views, key bindings, breakpoints, components
+- **[Development Guide](docs/DEVELOPMENT.md)** - Branching, Makefile targets, guidelines
+- **[Testing](docs/TESTING.md)** - What is tested, how to run it, coverage, gaps
+- **[Roadmap](docs/ROADMAP.md)** - As-built status and the Phase 6–7 plan (nothing in it is implemented)
 
 ## Technical Stack
 
 | Component | Choice | Rationale |
 | --------- | ------ | --------- |
-| Language | Go 1.22+ | Single binary, low memory, cross-compilation |
+| Language | Go 1.24+ | Single binary, low memory, cross-compilation |
 | Database | SQLite (modernc.org/sqlite) | Pure Go, embedded, no CGO |
 | TUI | Bubble Tea + Lip Gloss | Modern, composable, terminal UI |
 | Config | TOML | Human-readable |
@@ -36,7 +43,7 @@ VT-UOS is a realistic vault population management and operations system inspired
 
 - Primary: Raspberry Pi 4/5 (ARM64, 1-8GB RAM)
 - Secondary: Pi Zero 2W (ARM64, 512MB RAM)
-- Development: Any Go 1.22+ system
+- Development: Any Go 1.24+ system (`go.mod`)
 
 **Non-Negotiable:**
 
@@ -47,6 +54,8 @@ VT-UOS is a realistic vault population management and operations system inspired
 5. Power-loss resilient
 6. Deterministic builds
 
+> ⚠ See [#15](https://github.com/jstephenperry/vt-uos/issues/15) and [#36](https://github.com/jstephenperry/vt-uos/issues/36).
+
 **Explicitly Avoided:**
 
 - CGO, external databases, web frameworks, heavy ORMs, global state
@@ -55,69 +64,80 @@ VT-UOS is a realistic vault population management and operations system inspired
 
 ```plaintext
 vtuos/
-├── cmd/vtuos/main.go           # Entry point
+├── cmd/vtuos/main.go           # Entry point: local console, serve, connect
 ├── internal/
+│   ├── client/                 # Client terminal (connect mode)
 │   ├── config/                 # Configuration loading
-│   ├── database/               # SQLite connection & migrations
+│   ├── database/               # SQLite connection, migrations, recovery
+│   │   ├── migrations/         # Embedded SQL migrations (001, 002)
+│   │   └── seed/               # Seed data generator
 │   ├── models/                 # Domain models
+│   ├── protocol/               # Wire types shared by server, web console, clients
 │   ├── repository/             # Data access layer
+│   ├── server/                 # Master server: HTTP API, SSE, web console
+│   │   └── web/                # Embedded console template
+│   │       └── static/         # Embedded console JS/CSS
 │   ├── services/               # Business logic
+│   │   ├── facilities/         # System monitoring, maintenance records
 │   │   ├── population/         # Census, lineage, demographics
-│   │   ├── resources/          # Inventory, rationing, forecasting
-│   │   ├── labor/              # Work assignments, scheduling
-│   │   ├── facilities/         # System monitoring, maintenance
-│   │   ├── medical/            # Health records, epidemiology
-│   │   ├── security/           # Access control, incidents
-│   │   └── governance/         # Directives, audit log
-│   ├── simulation/             # Time progression, events
-│   ├── tui/                    # Terminal UI
-│   │   ├── components/         # Reusable UI components
+│   │   └── resources/          # Inventory, rationing, forecasting
+│   ├── simulation/             # Simulation control core
+│   ├── testutil/               # Test DB helper and fixtures
+│   ├── tui/                    # Terminal UI shell
+│   │   ├── components/         # Table, Input, Select, Form
 │   │   └── views/              # Screen implementations
-│   └── util/                   # Helpers
+│   │       ├── facilities/
+│   │       ├── population/
+│   │       ├── resources/
+│   │       └── simulation/
+│   └── util/                   # ID generation, vault clock, date helpers
 ├── docs/                       # Detailed documentation
-│   ├── DATABASE.md             # Complete schema
-│   ├── MODULES.md              # Service specifications
-│   ├── TUI.md                  # UI design
-│   ├── CONFIGURATION.md        # Setup & config
-│   └── DEVELOPMENT.md          # Dev workflow
-├── migrations/                 # SQL migrations
-├── testdata/                   # Test fixtures
+│   └── superpowers/            # Design specs and plans
+│       ├── plans/
+│       └── specs/
+├── testdata/                   # Sample TOML configs
+├── .vscode/                    # Editor settings
 └── Makefile
 ```
 
 ## Core Domain Concepts
 
-**Residents** - Vault dwellers with lineage tracking, clearance levels, and life history  
-**Households** - Family units with ration classes and quarters assignments  
-**Resources** - Consumables tracked via stocks, transactions, and expiration  
-**Facilities** - Infrastructure systems with efficiency, maintenance schedules  
-**Vocations** - Jobs with shift patterns, skill requirements, headcount limits  
-**Simulation** - Time progression engine with consumption, aging, random events
+**Residents** - Vault dwellers with registry numbers, biological-parent links, clearance levels and status (`internal/models/resident.go`)  
+**Households** - Family units with a ration class that sets daily calorie and water targets (`internal/models/household.go`)  
+**Resources** - Categories, items and stock lots tracked through a transaction ledger with expiration (`internal/models/resource.go`)  
+**Facilities** - Infrastructure systems with efficiency, status and maintenance intervals (`internal/models/facility.go`)  
+**Vocations / Quarters** - Tables exist and are seeded; `Quarters` is modeled but neither has a repository or service (`internal/database/migrations/001_initial.sql`, `internal/database/seed/generator.go`)  
+**Simulation** - Daily pipeline: consumption, production, expiration, degradation, maintenance, incidents, births/deaths (`internal/simulation/tick.go`)
 
 **→ Full database schema:** [docs/DATABASE.md](docs/DATABASE.md)
 
 ## System Modules
 
-1. **Population** - Census, vital records, lineage, inbreeding detection, demographics
-2. **Resources** - Inventory, rationing, expiration tracking, runway forecasting
-3. **Labor** - Work assignments, shift scheduling, vacancy tracking
-4. **Facilities** - System monitoring, maintenance scheduling, failure prediction
-5. **Medical** - Health records, radiation tracking, epidemiology
-6. **Security** - Access control, incident management, audit logging
-7. **Governance** - Directives, policy enforcement, classification
-8. **Simulation** - Time engine, consumption processing, event generation
+Implemented (service + repository + TUI view):
 
-**→ Complete API specifications:** [docs/MODULES.md](docs/MODULES.md)
+1. **Population** - Census, resident forms, birth/death registration, demographics; inbreeding coefficient computed but not surfaced (`internal/services/population`)
+2. **Resources** - Inventory, consumption ledger, expiration, runway forecasting, allocation calculation (`internal/services/resources`)
+3. **Facilities** - Systems list/detail, stats, maintenance records (`internal/services/facilities`)
+4. **Simulation** - Time engine, daily pipeline, incidents, alerts, persistence (`internal/simulation`)
+
+Planned (tables only in `internal/database/migrations/001_initial.sql`; F6–F9 render static text in `internal/tui/app.go`):
+
+5. **Labor** - Work assignments, shift scheduling, vacancy tracking
+6. **Medical** - Health records, radiation tracking, epidemiology
+7. **Security** - Access control, incident management
+8. **Governance** - Directives, policy enforcement, classification
+
+**→ Implemented services:** [docs/MODULES.md](docs/MODULES.md) · **→ Planned:** [docs/ROADMAP.md](docs/ROADMAP.md)
 
 ## User Interface
 
 **Terminal UI** with Bubble Tea framework:
 
-- Green phosphor aesthetic (Fallout-style)
-- Keyboard-only navigation (F-keys, vi-style)
-- Hierarchical menus (Dashboard → Modules → Views)
-- Reusable components (tables, forms, modals, trees)
-- Dense information display maximizing screen real estate
+- Green phosphor, amber or white theme (`internal/tui/styles.go`)
+- Keyboard-only navigation: F-keys switch modules, vi-style `j`/`k` in lists (`internal/tui/keys.go`, `internal/tui/app.go`)
+- Flat module switching (F1–F11) with list → detail drill-down; no hierarchical menus
+- Reusable components: `Table`, `Input`, `Select`, `Form` (`internal/tui/components`); the quit confirmation is drawn inline in `app.go`, and there is no modal, tabs or tree component
+- Responsive layout at 60 and 100 columns (`internal/tui/layout.go`)
 
 **→ Full TUI design guide:** [docs/TUI.md](docs/TUI.md)
 
@@ -125,32 +145,40 @@ vtuos/
 
 ```bash
 # Clone and build
-git clone https://github.com/yourusername/vt-uos.git
+git clone https://github.com/jstephenperry/vt-uos.git
 cd vt-uos
 make build
 
-# Run
+# Seed, then run the local console
+./bin/vtuos -seed
 ./bin/vtuos
 
+# Master server + client terminal
+./bin/vtuos serve -token overseer-secret
+./bin/vtuos connect 127.0.0.1:8080
+
 # Cross-compile for Raspberry Pi
-make build-linux-arm64
+make build-pi
 ```
 
-**→ Complete setup guide:** [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
+**→ Flags and exit codes:** [docs/CLI.md](docs/CLI.md) · **→ Config keys:** [docs/CONFIGURATION.md](docs/CONFIGURATION.md)
 
 ## Development
 
-**Architecture:** Clean layered architecture with dependency injection
+**Architecture:** Layered, with constructor injection from `cmd/vtuos/main.go`
 
 - **Models** - Domain entities
 - **Repository** - Data access (SQLite)
 - **Services** - Business logic
-- **TUI** - Presentation layer
+- **Simulation** - Engine over the services (also issues some direct SQL)
+- **TUI / Server / Client** - Presentation layers
 
-**Testing:** Unit tests (80% coverage), integration tests, property-based tests  
-**Workflow:** Feature branches → PR → CI → Merge to develop → Release from main
+**Testing:** `go test -race` unit and teatest end-to-end tests; 41.8% total statement coverage; no test files in `config`, `database`, `seed`, `util`, `protocol`, `client`, `testutil` or any `services/*` package  
+**Workflow:** Feature branches → PR → merge to `main` (single branch; no CI config in the repo)
 
-**→ Developer guide:** [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md)
+> ⚠ See [#7](https://github.com/jstephenperry/vt-uos/issues/7).
+
+**→ Developer guide:** [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) · **→ Testing:** [docs/TESTING.md](docs/TESTING.md)
 
 ## Implementation Phases
 
@@ -162,14 +190,16 @@ make build-linux-arm64
 - [ ] **Phase 6:** Remaining modules (labor, medical, security, governance)
 - [ ] **Phase 7:** Polish (dashboard, alerts, optimization)
 
-See [docs/SIMULATION.md](docs/SIMULATION.md) and [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the control core and client/master-server deployment.
+See [docs/ROADMAP.md](docs/ROADMAP.md) for per-module status and the Phase 6–7 plan, and [docs/SIMULATION.md](docs/SIMULATION.md) / [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md) for the control core and client/master-server deployment.
 
 ## Key Design Decisions
 
 **Why SQLite?** Pure Go (no CGO), embedded, sub-512MB RAM, power-loss resilient  
-**Why TUI not Web?** Authentic aesthetic, low resource overhead, offline-first  
+**Why TUI first?** Authentic aesthetic, low resource overhead, offline-first; the web console exists only in `serve` mode  
 **Why Go?** Single binary, cross-compilation, excellent concurrency, low memory  
 **Why No CGO?** Simplifies cross-compilation for ARM targets (Pi)
+
+> ⚠ See [#9](https://github.com/jstephenperry/vt-uos/issues/9), [#21](https://github.com/jstephenperry/vt-uos/issues/21), [#22](https://github.com/jstephenperry/vt-uos/issues/22) and [#45](https://github.com/jstephenperry/vt-uos/issues/45).
 
 ## AI Assistant Guidelines
 
@@ -188,8 +218,15 @@ When working on this project:
 
 ## Reference Files
 
-- [DATABASE.md](docs/DATABASE.md) - Complete SQLite schema with all tables, indexes, business rules
-- [MODULES.md](docs/MODULES.md) - Service specifications, algorithms, API interfaces
-- [TUI.md](docs/TUI.md) - UI design, components, navigation, key bindings, examples
-- [CONFIGURATION.md](docs/CONFIGURATION.md) - Setup, config files, environment variables
-- [DEVELOPMENT.md](docs/DEVELOPMENT.md) - Workflow, testing, build system, guidelines
+- [ARCHITECTURE.md](docs/ARCHITECTURE.md) - Layers, process model, data flow, layering exceptions
+- [CLI.md](docs/CLI.md) - Invocation forms, flags, exit codes, startup sequence, signals
+- [CONFIGURATION.md](docs/CONFIGURATION.md) - TOML keys, defaults, validation, file search order
+- [DATABASE.md](docs/DATABASE.md) - Schema from migrations, indexes, PRAGMAs, migration and recovery mechanics
+- [MODULES.md](docs/MODULES.md) - Population, Resources, Facilities: methods, algorithms, repositories
+- [SIMULATION.md](docs/SIMULATION.md) - Tick pipeline, time model, incidents, alerts, persistence, control API
+- [API.md](docs/API.md) - HTTP routes, authentication, SSE, client protocol
+- [DEPLOYMENT.md](docs/DEPLOYMENT.md) - Modes, tokens, kiosk, reset procedure
+- [TUI.md](docs/TUI.md) - Views, key bindings, breakpoints, components, style tokens
+- [DEVELOPMENT.md](docs/DEVELOPMENT.md) - Branching, commit style, Makefile targets, guidelines
+- [TESTING.md](docs/TESTING.md) - Test inventory, commands, coverage, gaps
+- [ROADMAP.md](docs/ROADMAP.md) - As-built status; Phase 6–7 plan (nothing in it is implemented)
