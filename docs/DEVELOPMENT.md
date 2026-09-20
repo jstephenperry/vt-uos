@@ -1,13 +1,16 @@
 # Development Guide
 
+Companion documents: [ARCHITECTURE.md](ARCHITECTURE.md) (how the binary is wired), [TESTING.md](TESTING.md) (what tests exist and how to run them), [ROADMAP.md](ROADMAP.md) (unbuilt work).
+
 ## Development Workflow
 
 ### Branch Strategy
 
-- `main` - Stable, release-ready
-- `develop` - Integration branch
+- `main` - Stable, release-ready; the only branch on the remote (`git branch -r` lists `origin/main` alone)
 - `feature/*` - Feature development
 - `fix/*` - Bug fixes
+
+There is no `develop` integration branch; feature and fix branches merge to `main` by pull request.
 
 ### Commit Messages
 
@@ -23,167 +26,85 @@ test(simulation): add property tests for consumption
 
 ### Code Style
 
-- Run `gofmt` and `goimports` on all code
-- Use `golangci-lint` with provided config
+- Run `gofmt` on all code. `make fmt` runs `go fmt ./...` followed by `goimports -w .`; the Makefile expects `goimports` on `PATH` but it is not required for `make build` or `make test`.
+- `make lint` runs `golangci-lint run ./...` and exits 1 with an install hint if the binary is missing. The Makefile expects `golangci-lint`; it is not required to build. No `.golangci.yml` configuration file exists in the repository, so the linter runs with its defaults.
 - No exported functions without documentation comments
 - Errors must be wrapped with context: `fmt.Errorf("loading resident %s: %w", id, err)`
 
 ### Pull Request Checklist
 
-- [ ] Tests pass
-- [ ] Lint passes
+- [ ] `make test` passes
 - [ ] Documentation updated
-- [ ] Migration added (if schema change)
-- [ ] CHANGELOG updated
+- [ ] Migration added under `internal/database/migrations/` (if schema change)
+
+There is no `CHANGELOG` file and no CI configuration (`.github/`) in the repository; the checklist above is what a reviewer can actually verify.
 
 ## Testing Requirements
 
-### Unit Tests
+Measured at commit `34c3398` with `go test -race -count=1 -coverprofile=coverage.out ./internal/...`:
 
-- All service methods must have unit tests
-- Repository methods tested against in-memory SQLite
-- Simulation calculations tested with known inputs/outputs
-- Minimum 80% code coverage for `internal/services/`
+- Total statement coverage: **41.8%** (`go tool cover -func`).
+- Ten packages have no `_test.go` files at all: `internal/client`, `internal/config`, `internal/database`, `internal/database/seed`, `internal/protocol`, `internal/services/facilities`, `internal/services/population`, `internal/services/resources`, `internal/testutil`, `internal/util`.
+- `make test-coverage-check` enforces an 80% total threshold and therefore fails on the current tree.
+
+> ⚠ See [#7](https://github.com/jstephenperry/vt-uos/issues/7).
+
+The per-package table, the test helpers, and the known gaps are in [TESTING.md](TESTING.md).
 
 ```bash
-# Run all tests
+# Run all unit tests (what the Makefile runs)
 make test
 
-# Run with coverage
+# Coverage report (coverage.html) plus the total line
 make test-coverage
 
-# Run specific package
-go test ./internal/services/population/...
+# One package
+make test-pkg PKG=./internal/models
 ```
 
-### Integration Tests
-
-- Full CRUD workflows for each module
-- Simulation engine tick processing
-- Database migration up/down
-
-```bash
-# Run integration tests
-make test-integration
-```
-
-### Property-Based Tests
-
-- COI calculation for random family trees
-- Resource consumption calculations
-- Population projection accuracy
-
-Example with `gopter`:
-
-```go
-func TestCOIProperties(t *testing.T) {
-    properties := gopter.NewProperties(nil)
-    
-    properties.Property("COI is between 0 and 1", prop.ForAll(
-        func(tree FamilyTree) bool {
-            coi := CalculateCOI(tree.Parent1, tree.Parent2)
-            return coi >= 0 && coi <= 1
-        },
-        genFamilyTree(),
-    ))
-    
-    properties.TestingRun(t)
-}
-```
+`make test-integration` passes `-tags=integration`, but no file in the repository carries that build tag, so it runs exactly the same tests as `make test`.
 
 ### Test Data
 
-Located in `testdata/`:
-
-- `vault-076.toml` - Test vault configuration
-- `seed/day1/` - Day 1 vault with 500 residents
-- `seed/year10/` - Year 10 vault with demographic changes
-- `seed/crisis/` - Crisis scenarios (resource shortage, epidemic)
+`testdata/` contains two files, both TOML configs: `vault-076.toml` and `vault-exhibit.toml`. There are no seed fixture directories. Test databases are created in memory by each test package (see [TESTING.md](TESTING.md)).
 
 ## Implementation Order
 
-### Phase 1: Foundation (Week 1)
+Phases 1–5 (foundation, population, resources, facilities, simulation core + master/client modes + web console) are implemented and described as built in [ARCHITECTURE.md](ARCHITECTURE.md), [MODULES.md](MODULES.md) and [SIMULATION.md](SIMULATION.md).
+Phase 6 (labor, medical, security, governance) and Phase 7 (dashboard polish, alerts, reporting, optimisation) are not started; the F6–F9 modules render fixed placeholder text.
+The phase plan, deliverables and week estimates that used to live here are collected in [ROADMAP.md](ROADMAP.md).
+When adding a module, follow the order used by the existing ones: model → repository → service → TUI view → `internal/tui/app.go` wiring.
+Schema changes go in a new `NNN_description.sql` file under `internal/database/migrations/` with `-- +migrate Up` / `-- +migrate Down` markers; the file is embedded at build time.
+Nothing in this section is a commitment to dates.
 
-1. ✅ Project scaffolding, Go modules, Makefile
-2. ✅ Configuration loading
-3. ✅ Database connection, migration system
-4. ✅ Base TUI application shell
-5. ✅ Logging infrastructure
-
-### Phase 2: Population Module - MVP (Week 2-3)
-
-1. Resident model and repository
-2. Household model and repository
-3. Population service (CRUD operations)
-4. Census TUI view (list, search, view detail)
-5. Add/edit resident forms
-6. Basic vital records (birth, death)
-
-**Deliverable:** Can manage 500 residents with CRUD operations via TUI
-
-### Phase 3: Resource Module (Week 4-5)
-
-1. Resource models and repositories
-2. Inventory management service
-3. Transaction recording
-4. Inventory TUI views
-5. Expiration tracking
-
-**Deliverable:** Can track resources and consumption
-
-### Phase 4: Facility Module (Week 6)
-
-1. Facility system models
-2. Maintenance tracking
-3. System status TUI views
-4. Work order management
-
-**Deliverable:** Can monitor vault systems
-
-### Phase 5: Simulation Engine (Week 7-8)
-
-1. Time management
-2. Resource consumption loop
-3. Population events (aging, births, deaths)
-4. System degradation
-5. Random event system
-
-**Deliverable:** Vault operates autonomously over time
-
-### Phase 6: Remaining Modules (Week 9-11)
-
-1. Labor allocation (Week 9)
-2. Medical records (Week 10)
-3. Security and access control (Week 10)
-4. Governance and directives (Week 11)
-
-### Phase 7: Polish (Week 12)
-
-1. Dashboard with key metrics
-2. Alert system
-3. Reporting and exports
-4. Performance optimization
-5. Documentation
+> ⚠ See [#44](https://github.com/jstephenperry/vt-uos/issues/44).
 
 ## Architecture Guidelines
 
+These are the conventions the existing code follows. See [ARCHITECTURE.md](ARCHITECTURE.md) for where they are currently broken.
+
 ### Dependency Injection
 
-Use constructor injection, no globals:
+Services take a `*sql.DB` and construct their own repositories; nothing is global. This is the shape used by all three services (`internal/services/population/service.go`, `internal/services/resources/service.go`, `internal/services/facilities/service.go`):
 
 ```go
-type PopulationService struct {
-    repo   repository.ResidentRepository
-    logger *slog.Logger
+// internal/services/facilities/service.go (as built)
+type Service struct {
+    db          *sql.DB
+    facilities  *repository.FacilityRepository
+    idGenerator *util.IDGenerator
 }
 
-func NewPopulationService(repo repository.ResidentRepository, logger *slog.Logger) *PopulationService {
-    return &PopulationService{
-        repo:   repo,
-        logger: logger,
+func NewService(db *sql.DB) *Service {
+    return &Service{
+        db:          db,
+        facilities:  repository.NewFacilityRepository(db),
+        idGenerator: util.NewIDGenerator(),
     }
 }
 ```
+
+Loggers are not injected; packages use `slog.Default()`, optionally tagged with `With("component", ...)` (`internal/simulation/engine.go`, `internal/server/server.go`).
 
 ### Error Handling
 
@@ -198,38 +119,11 @@ if err != nil {
 
 ### Transaction Management
 
-Use repository methods that accept `*sql.Tx`:
-
-```go
-func (s *PopulationService) RegisterBirth(ctx context.Context, input BirthRegistration) (*Resident, error) {
-    tx, err := s.db.BeginTx(ctx, nil)
-    if err != nil {
-        return nil, fmt.Errorf("starting transaction: %w", err)
-    }
-    defer tx.Rollback()
-    
-    // Multiple operations
-    resident, err := s.repo.CreateResident(ctx, tx, input.Resident)
-    if err != nil {
-        return nil, err
-    }
-    
-    err = s.repo.RecordVitalEvent(ctx, tx, input.VitalRecord)
-    if err != nil {
-        return nil, err
-    }
-    
-    if err := tx.Commit(); err != nil {
-        return nil, fmt.Errorf("committing transaction: %w", err)
-    }
-    
-    return resident, nil
-}
-```
+Repository methods accept an optional `*sql.Tx`; when it is `nil` they run against the pool. Services open the transaction. `population.Service.RegisterBirth` is the reference example (`internal/services/population/service.go`, `RegisterBirth`): it calls `s.db.BeginTx`, defers `tx.Rollback()`, creates the resident inside the transaction, then commits. `database.DB.WithTransaction` (`internal/database/database.go`) offers the same pattern with panic-safe rollback and is used by the migrator.
 
 ### Logging
 
-Use structured logging with context:
+Use structured logging with key-value pairs:
 
 ```go
 s.logger.Info("resident created",
@@ -237,79 +131,51 @@ s.logger.Info("resident created",
     "registry_number", resident.RegistryNumber,
     "entry_type", resident.EntryType,
 )
-
-s.logger.Error("failed to create resident",
-    "error", err,
-    "input", input,
-)
 ```
+
+`slog` output goes to the file named by `logging.file` as JSON, or to stderr as text when no file is configured (`cmd/vtuos/main.go`, `setupLogging`). In `connect` mode logs are discarded when no file is configured so they never overwrite the terminal (`cmd/vtuos/main.go`, `setupClientLogging`).
 
 ## Build System
 
+Go toolchain: `go.mod` declares `go 1.24.0`; the figures in this document were produced with go1.24.7. `CGO_ENABLED=0` is set for every build target and the resulting binary is static (`ldd` reports "not a dynamic executable").
+
 ### Makefile Targets
 
-```bash
-# Build
-make build                  # Build for current platform
-make build-linux-arm64      # Cross-compile for Pi
-make build-all              # Build all platforms
+Every target in `Makefile`, in file order:
 
-# Test
-make test                   # Run unit tests
-make test-integration       # Run integration tests
-make test-coverage          # Generate coverage report
+| Target | Purpose |
+| --- | --- |
+| `all` | Default target: `lint`, then `test`, then `build` (requires `golangci-lint`). |
+| `build` | `CGO_ENABLED=0 go build` with `-s -w` and `-X main.Version`/`-X main.BuildTime` → `bin/vtuos`. |
+| `build-pi` | Same, `GOOS=linux GOARCH=arm64` → `bin/vtuos-linux-arm64`. |
+| `build-pi-zero` | arm64 with `-tags sqlite_omit_load_extension` → `bin/vtuos-linux-arm64-minimal`. |
+| `build-all` | `build` + `build-pi` + `build-pi-zero`. |
+| `test` | `go test -v -race -cover ./internal/...`. |
+| `test-coverage` | Same with `-coverprofile=coverage.out`, writes `coverage.html`, prints the `total` line. |
+| `test-pkg` | `go test -v -race -coverprofile` for `PKG=<path>`; errors if `PKG` is unset. |
+| `test-coverage-check` | Runs tests and exits 1 if total coverage is below 80% (uses `bc`). |
+| `test-integration` | `go test -v -race -tags=integration ./internal/...` (no files carry the tag). |
+| `test-all` | `test` + `test-integration`. |
+| `lint` | `golangci-lint run ./...`; fails with an install hint if not on `PATH`. |
+| `fmt` | `go fmt ./...` then `goimports -w .`. |
+| `run` | `build`, then `./bin/vtuos` (local console). |
+| `serve` | `build`, then `./bin/vtuos serve`. |
+| `connect` | `build`, then `./bin/vtuos connect $(ADDR)`; errors if `ADDR` is unset. |
+| `migrate` | `./bin/vtuos --migrate-only` (does not build first). |
+| `seed` | `./bin/vtuos --seed` (does not build first). |
+| `clean` | Removes `bin/`, `coverage.out`, `coverage.html`, and `*.db`, `*.db-wal`, `*.db-shm` in the repo root. |
+| `verify-static` | Builds to `/tmp/vtuos-check` and checks `ldd` reports a static binary. |
+| `dev-tools` | `go install` of `golangci-lint` and `goimports`. |
+| `backup` | Copies `./vault.db` to `backups/vault-<timestamp>.db` if it exists (plain `cp`, not `VACUUM INTO`). |
+| `help` | Prints the target list. |
 
-# Quality
-make lint                   # Run golangci-lint
-make fmt                    # Format code
-make vet                    # Run go vet
+There are no `vet`, `deps`, `migrate-up`, `migrate-down`, or `migrate-status` targets. `go vet ./...` reports nothing on the current tree.
 
-# Database
-make migrate-up             # Run migrations
-make migrate-down           # Rollback migrations
-make migrate-status         # Check migration status
+> ⚠ See [#25](https://github.com/jstephenperry/vt-uos/issues/25).
 
-# Development
-make run                    # Run application
-make clean                  # Clean build artifacts
-make deps                   # Download dependencies
-```
+### Version stamping
 
-### Example Makefile
-
-```makefile
-.PHONY: build test lint
-
-BINARY_NAME=vtuos
-VERSION=$(shell git describe --tags --always --dirty)
-BUILD_TIME=$(shell date -u '+%Y-%m-%d_%H:%M:%S')
-
-LDFLAGS=-ldflags "-X main.Version=${VERSION} -X main.BuildTime=${BUILD_TIME}"
-
-build:
-	go build ${LDFLAGS} -o bin/${BINARY_NAME} ./cmd/vtuos
-
-build-linux-arm64:
-	GOOS=linux GOARCH=arm64 go build ${LDFLAGS} -o bin/${BINARY_NAME}-linux-arm64 ./cmd/vtuos
-
-test:
-	go test -v -race -cover ./...
-
-test-coverage:
-	go test -v -race -coverprofile=coverage.out ./...
-	go tool cover -html=coverage.out -o coverage.html
-
-lint:
-	golangci-lint run
-
-fmt:
-	gofmt -s -w .
-	goimports -w .
-
-clean:
-	rm -rf bin/
-	rm -f coverage.out coverage.html
-```
+`-X main.Version` and `-X main.BuildTime` populate `Version`/`BuildTime` in `cmd/vtuos/main.go`; `runLocal` copies them into `tui.Version`/`tui.BuildTime` for the header, and `connectMain` passes `Version` to `client.NewConn` so the master records it in `ClientInfo.Version`. `vtuos -version` prints them and exits 0.
 
 ## AI Assistant Guidelines
 
@@ -317,7 +183,7 @@ When implementing features for this project:
 
 1. **Start with the data model** - Ensure the SQLite schema supports the feature (see [DATABASE.md](DATABASE.md))
 2. **Write the repository layer first** - Pure data access, no business logic
-3. **Implement service layer with tests** - Business logic lives here (see [MODULES.md](MODULES.md))
+3. **Implement service layer with tests** - Business logic lives here (see [MODULES.md](MODULES.md)); note that none of the three existing services has a test file yet
 4. **Build TUI last** - UI should call services, not repositories (see [TUI.md](TUI.md))
 5. **Keep functions small** - Under 50 lines preferred
 6. **Handle all errors** - No ignored errors, wrap with context
@@ -325,30 +191,6 @@ When implementing features for this project:
 8. **Log meaningfully** - Debug for development, Info for operations, Warn/Error for problems
 9. **Follow existing patterns** - Look at implemented modules for conventions
 10. **Ask clarifying questions** - If a requirement is ambiguous, ask before assuming
-
-## Performance Optimization
-
-### Database Query Optimization
-
-1. Use indexes on frequently queried columns
-2. Use prepared statements for repeated queries
-3. Batch inserts when possible
-4. Use transactions for multiple operations
-5. Profile slow queries with `EXPLAIN QUERY PLAN`
-
-### Memory Optimization
-
-1. Stream large result sets, don't load all into memory
-2. Use pagination for UI lists
-3. Release resources promptly (defer cleanup)
-4. Profile with `pprof` to identify leaks
-
-### TUI Optimization
-
-1. Debounce rapid updates
-2. Only re-render changed regions
-3. Lazy-load data on demand
-4. Cache computed values
 
 ## References
 
