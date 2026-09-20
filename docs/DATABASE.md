@@ -1,519 +1,634 @@
-# Database Schema Specification
+# Database Schema
 
 ## Overview
 
-VT-UOS uses SQLite via `modernc.org/sqlite` (pure Go, no CGO) for all data persistence. The schema is designed for a closed-loop vault environment managing populations, resources, facilities, and operations over multi-generational timespans.
+VT-UOS persists all state in a single SQLite file opened through `modernc.org/sqlite` (pure Go, no CGO) (`internal/database/database.go`). Every table, index, and constraint below comes from the two embedded migration files (`internal/database/migrations/001_initial.sql`, `internal/database/migrations/002_performance_hardening.sql`); no other file defines schema. There are no `CREATE TRIGGER` statements anywhere in the migrations — the schema has no triggers.
 
-## Core Entities
+Twenty domain tables exist. `001_initial.sql` creates all twenty; `002_performance_hardening.sql` adds indexes only (plus one `ANALYZE`) and creates no new tables. A twenty-first table, `schema_migrations`, is created directly by Go code rather than by a migration file (`internal/database/migrate.go`) and is described under "Migration mechanism" below.
 
-### Resident
+## Vault Metadata
 
-The central entity representing a vault dweller.
+### `vault_metadata`
 
-```sql
-CREATE TABLE residents (
-    -- Identity
-    id TEXT PRIMARY KEY,                              -- UUIDv7
-    registry_number TEXT UNIQUE NOT NULL,             -- "V076-00001" format
-    
-    -- Biographic Data
-    surname TEXT NOT NULL,
-    given_names TEXT NOT NULL,
-    date_of_birth TEXT NOT NULL,                      -- ISO8601 date
-    date_of_death TEXT,                               -- NULL if alive
-    sex TEXT NOT NULL CHECK (sex IN ('M', 'F')),
-    blood_type TEXT CHECK (blood_type IN ('A+', 'A-', 'B+', 'B-', 'AB+', 'AB-', 'O+', 'O-')),
-    
-    -- Origin & Status
-    entry_type TEXT NOT NULL CHECK (entry_type IN ('ORIGINAL', 'VAULT_BORN', 'ADMITTED')),
-    entry_date TEXT NOT NULL,                         -- ISO8601 datetime
-    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'DECEASED', 'EXILED', 'SURFACE_MISSION', 'QUARANTINE')),
-    
-    -- Lineage (for genetic tracking)
-    biological_parent_1_id TEXT REFERENCES residents(id),
-    biological_parent_2_id TEXT REFERENCES residents(id),
-    
-    -- Current Assignments
-    household_id TEXT REFERENCES households(id),
-    quarters_id TEXT REFERENCES quarters(id),
-    primary_vocation_id TEXT REFERENCES vocations(id),
-    clearance_level INTEGER NOT NULL DEFAULT 1 CHECK (clearance_level BETWEEN 1 AND 10),
-    
-    -- Metadata
-    notes TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+Key/value store for schema version, the simulated vault clock, and simulation engine counters that must survive a restart.
 
-CREATE INDEX idx_residents_status ON residents(status);
-CREATE INDEX idx_residents_household ON residents(household_id);
-CREATE INDEX idx_residents_vocation ON residents(primary_vocation_id);
-```
+| Column | Type | Constraints | Default |
+| --- | --- | --- | --- |
+| `key` | TEXT | PRIMARY KEY | — |
+| `value` | TEXT | NOT NULL | — |
+| `updated_at` | TEXT | NOT NULL | `datetime('now')` |
 
-**Business Rules:**
+Indexes: none beyond the primary key. Foreign keys: none. Triggers: none.
 
-- `registry_number` format: `V{vault_number}-{5-digit sequence}` (e.g., V076-00001)
-- `date_of_birth` for VAULT_BORN residents must be after vault seal date
-- `biological_parent_*` required for VAULT_BORN, NULL for ORIGINAL/ADMITTED
-- `date_of_death` required when status changes to DECEASED
-- Clearance level 10 reserved for Overseer
+The migration itself seeds two rows: `schema_version`='1' and `vault_time`='2077-10-23T09:47:00Z' (`internal/database/migrations/001_initial.sql`). At runtime the simulation engine reads/writes four keys via an upsert (`INSERT ... ON CONFLICT(key) DO UPDATE`) — `vault_time`, `sim_births`, `sim_deaths`, `sim_tick_count` — so the vault clock and cumulative birth/death/tick counters survive a restart (`internal/simulation/persistence.go`).
 
-### Household
+## Population & Housing
 
-Grouping of residents sharing living quarters.
+### `quarters`
 
-```sql
-CREATE TABLE households (
-    id TEXT PRIMARY KEY,
-    designation TEXT UNIQUE NOT NULL,                 -- "H-0042"
-    household_type TEXT NOT NULL CHECK (household_type IN ('FAMILY', 'INDIVIDUAL', 'COMMUNAL', 'TEMPORARY')),
-    head_of_household_id TEXT REFERENCES residents(id),
-    quarters_id TEXT REFERENCES quarters(id),
-    ration_class TEXT NOT NULL DEFAULT 'STANDARD' CHECK (ration_class IN ('MINIMAL', 'STANDARD', 'ENHANCED', 'MEDICAL', 'LABOR_INTENSIVE')),
-    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'DISSOLVED', 'MERGED')),
-    formed_date TEXT NOT NULL,
-    dissolved_date TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-```
+Physical living-space units that residents and households occupy.
 
-**Business Rules:**
+| Column | Type | Constraints | Default |
+| --- | --- | --- | --- |
+| `id` | TEXT | PRIMARY KEY | — |
+| `unit_code` | TEXT | UNIQUE NOT NULL | — |
+| `sector` | TEXT | NOT NULL | — |
+| `level` | INTEGER | NOT NULL | — |
+| `unit_type` | TEXT | NOT NULL, CHECK IN (`SINGLE`,`DOUBLE`,`FAMILY`,`DORMITORY`,`EXECUTIVE`) | — |
+| `capacity` | INTEGER | NOT NULL | — |
+| `square_meters` | REAL | NOT NULL | — |
+| `amenities` | TEXT | — | — |
+| `status` | TEXT | NOT NULL, CHECK IN (`AVAILABLE`,`OCCUPIED`,`MAINTENANCE`,`CONDEMNED`) | `'AVAILABLE'` |
+| `assigned_household_id` | TEXT | — (no FK, see note) | — |
+| `notes` | TEXT | — | — |
+| `created_at` | TEXT | NOT NULL | `datetime('now')` |
+| `updated_at` | TEXT | NOT NULL | `datetime('now')` |
 
-- Household dissolves when all members deceased or reassigned
-- Head of household must be ACTIVE adult resident (age 18+)
-- Ration class affects resource allocation calculations
+Indexes: `idx_quarters_status(status)`, `idx_quarters_sector(sector)`, `idx_quarters_unit_type(unit_type)` (`001_initial.sql`); `idx_quarters_household(assigned_household_id)` partial WHERE NOT NULL, `idx_quarters_available(status, sector, level, unit_type)` partial WHERE `status='AVAILABLE'`, `idx_quarters_capacity(unit_type, capacity)` (`002_performance_hardening.sql`).
 
-### Quarters
+Foreign keys: none. `assigned_household_id` has no `REFERENCES households(id)` clause — a comment in the migration explains this is deliberate: "SQLite doesn't support ALTER TABLE ADD CONSTRAINT, so this is handled at application level" (`internal/database/migrations/001_initial.sql`).
 
-Physical living spaces within the vault.
+### `vocations`
 
-```sql
-CREATE TABLE quarters (
-    id TEXT PRIMARY KEY,
-    unit_code TEXT UNIQUE NOT NULL,                   -- "R-A-042" (Residential-Section A-Unit 42)
-    sector TEXT NOT NULL,
-    level INTEGER NOT NULL,
-    unit_type TEXT NOT NULL CHECK (unit_type IN ('SINGLE', 'DOUBLE', 'FAMILY', 'DORMITORY', 'EXECUTIVE')),
-    capacity INTEGER NOT NULL,
-    square_meters REAL NOT NULL,
-    amenities TEXT,                                   -- JSON array: ["PRIVATE_BATHROOM", "KITCHENETTE"]
-    status TEXT NOT NULL DEFAULT 'AVAILABLE' CHECK (status IN ('AVAILABLE', 'OCCUPIED', 'MAINTENANCE', 'CONDEMNED')),
-    assigned_household_id TEXT REFERENCES households(id),
-    notes TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+Job categories and specific positions residents can be assigned to.
 
-CREATE INDEX idx_quarters_status ON quarters(status);
-CREATE INDEX idx_quarters_sector ON quarters(sector);
-```
+| Column | Type | Constraints | Default |
+| --- | --- | --- | --- |
+| `id` | TEXT | PRIMARY KEY | — |
+| `code` | TEXT | UNIQUE NOT NULL | — |
+| `title` | TEXT | NOT NULL | — |
+| `department` | TEXT | NOT NULL, CHECK IN (`ENGINEERING`,`MEDICAL`,`SECURITY`,`FOOD_PRODUCTION`,`ADMINISTRATION`,`EDUCATION`,`SANITATION`,`RESEARCH`) | — |
+| `required_clearance` | INTEGER | NOT NULL | `1` |
+| `required_skills` | TEXT | — | — |
+| `headcount_authorized` | INTEGER | NOT NULL | — |
+| `headcount_minimum` | INTEGER | NOT NULL | — |
+| `shift_pattern` | TEXT | NOT NULL, CHECK IN (`STANDARD`,`ROTATING`,`ON_CALL`,`CONTINUOUS`) | `'STANDARD'` |
+| `hazard_level` | TEXT | NOT NULL, CHECK IN (`NONE`,`LOW`,`MODERATE`,`HIGH`,`EXTREME`) | `'NONE'` |
+| `description` | TEXT | — | — |
+| `is_active` | INTEGER | NOT NULL | `1` |
+| `created_at` | TEXT | NOT NULL | `datetime('now')` |
+| `updated_at` | TEXT | NOT NULL | `datetime('now')` |
 
-**Capacity by Type:**
+Indexes: `idx_vocations_department(department)`, `idx_vocations_active(is_active)` (`001_initial.sql`); `idx_vocations_dept_active(department, is_active)` partial WHERE `is_active=1`, `idx_vocations_clearance(required_clearance, is_active)` partial WHERE `is_active=1` (`002_performance_hardening.sql`).
 
-- SINGLE: 1 person
-- DOUBLE: 2 persons
-- FAMILY: 4-6 persons
-- DORMITORY: 8-20 persons
-- EXECUTIVE: 2-4 persons (Overseer, department heads)
+Foreign keys: none. Triggers: none.
 
-### Vocation
+### `households`
 
-Job categories and specific positions.
+Groupings of residents that share a ration class and (usually) quarters.
 
-```sql
-CREATE TABLE vocations (
-    id TEXT PRIMARY KEY,
-    code TEXT UNIQUE NOT NULL,                        -- "ENG-MAINT-01"
-    title TEXT NOT NULL,                              -- "Maintenance Technician"
-    department TEXT NOT NULL CHECK (department IN ('ENGINEERING', 'MEDICAL', 'SECURITY', 'FOOD_PRODUCTION', 'ADMINISTRATION', 'EDUCATION', 'SANITATION', 'RESEARCH')),
-    required_clearance INTEGER NOT NULL DEFAULT 1,
-    required_skills TEXT,                             -- JSON array
-    headcount_authorized INTEGER NOT NULL,
-    headcount_minimum INTEGER NOT NULL,
-    shift_pattern TEXT NOT NULL DEFAULT 'STANDARD' CHECK (shift_pattern IN ('STANDARD', 'ROTATING', 'ON_CALL', 'CONTINUOUS')),
-    hazard_level TEXT NOT NULL DEFAULT 'NONE' CHECK (hazard_level IN ('NONE', 'LOW', 'MODERATE', 'HIGH', 'EXTREME')),
-    description TEXT,
-    is_active INTEGER NOT NULL DEFAULT 1,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+| Column | Type | Constraints | Default |
+| --- | --- | --- | --- |
+| `id` | TEXT | PRIMARY KEY | — |
+| `designation` | TEXT | UNIQUE NOT NULL | — |
+| `household_type` | TEXT | NOT NULL, CHECK IN (`FAMILY`,`INDIVIDUAL`,`COMMUNAL`,`TEMPORARY`) | — |
+| `head_of_household_id` | TEXT | — (no FK, see note) | — |
+| `quarters_id` | TEXT | REFERENCES `quarters(id)` | — |
+| `ration_class` | TEXT | NOT NULL, CHECK IN (`MINIMAL`,`STANDARD`,`ENHANCED`,`MEDICAL`,`LABOR_INTENSIVE`) | `'STANDARD'` |
+| `status` | TEXT | NOT NULL, CHECK IN (`ACTIVE`,`DISSOLVED`,`MERGED`) | `'ACTIVE'` |
+| `formed_date` | TEXT | NOT NULL | — |
+| `dissolved_date` | TEXT | — | — |
+| `created_at` | TEXT | NOT NULL | `datetime('now')` |
+| `updated_at` | TEXT | NOT NULL | `datetime('now')` |
 
-CREATE TABLE work_assignments (
-    id TEXT PRIMARY KEY,
-    resident_id TEXT NOT NULL REFERENCES residents(id),
-    vocation_id TEXT NOT NULL REFERENCES vocations(id),
-    assignment_type TEXT NOT NULL CHECK (assignment_type IN ('PRIMARY', 'SECONDARY', 'TEMPORARY', 'TRAINING')),
-    start_date TEXT NOT NULL,
-    end_date TEXT,                                    -- NULL for ongoing
-    shift TEXT CHECK (shift IN ('ALPHA', 'BETA', 'GAMMA')),  -- 8-hour shifts
-    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'ON_LEAVE', 'SUSPENDED', 'COMPLETED')),
-    performance_rating REAL CHECK (performance_rating BETWEEN 0 AND 5),
-    assigned_by TEXT REFERENCES residents(id),
-    notes TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+Indexes: `idx_households_status(status)`, `idx_households_quarters(quarters_id)` (`001_initial.sql`); `idx_households_head(head_of_household_id)` partial WHERE NOT NULL, `idx_households_active_ration(status, ration_class)` partial WHERE `status='ACTIVE'`, `idx_households_type_status(household_type, status)` (`002_performance_hardening.sql`).
 
-CREATE INDEX idx_work_assignments_resident ON work_assignments(resident_id);
-CREATE INDEX idx_work_assignments_vocation ON work_assignments(vocation_id);
-CREATE INDEX idx_work_assignments_status ON work_assignments(status);
-```
+Foreign keys: `quarters_id` → `quarters(id)`. `head_of_household_id` has no `REFERENCES residents(id)` clause, for the same application-level-enforcement reason noted in the migration's own comment (`internal/database/migrations/001_initial.sql`).
+
+### `residents`
+
+The central entity: a vault dweller, with identity, lineage, and current assignments.
+
+| Column | Type | Constraints | Default |
+| --- | --- | --- | --- |
+| `id` | TEXT | PRIMARY KEY | — |
+| `registry_number` | TEXT | UNIQUE NOT NULL | — |
+| `surname` | TEXT | NOT NULL | — |
+| `given_names` | TEXT | NOT NULL | — |
+| `date_of_birth` | TEXT | NOT NULL | — |
+| `date_of_death` | TEXT | — | — |
+| `sex` | TEXT | NOT NULL, CHECK IN (`M`,`F`) | — |
+| `blood_type` | TEXT | CHECK IN (`A+`,`A-`,`B+`,`B-`,`AB+`,`AB-`,`O+`,`O-`) | — |
+| `entry_type` | TEXT | NOT NULL, CHECK IN (`ORIGINAL`,`VAULT_BORN`,`ADMITTED`) | — |
+| `entry_date` | TEXT | NOT NULL | — |
+| `status` | TEXT | NOT NULL, CHECK IN (`ACTIVE`,`DECEASED`,`EXILED`,`SURFACE_MISSION`,`QUARANTINE`) | `'ACTIVE'` |
+| `biological_parent_1_id` | TEXT | REFERENCES `residents(id)` | — |
+| `biological_parent_2_id` | TEXT | REFERENCES `residents(id)` | — |
+| `household_id` | TEXT | REFERENCES `households(id)` | — |
+| `quarters_id` | TEXT | REFERENCES `quarters(id)` | — |
+| `primary_vocation_id` | TEXT | REFERENCES `vocations(id)` | — |
+| `clearance_level` | INTEGER | NOT NULL, CHECK BETWEEN 1 AND 10 | `1` |
+| `notes` | TEXT | — | — |
+| `created_at` | TEXT | NOT NULL | `datetime('now')` |
+| `updated_at` | TEXT | NOT NULL | `datetime('now')` |
+
+Indexes (`001_initial.sql`): `idx_residents_status(status)`, `idx_residents_household(household_id)`, `idx_residents_vocation(primary_vocation_id)`, `idx_residents_surname(surname)`, `idx_residents_registry(registry_number)`.
+
+Indexes (`002_performance_hardening.sql`): `idx_residents_parent1(biological_parent_1_id)` partial WHERE NOT NULL, `idx_residents_parent2(biological_parent_2_id)` partial WHERE NOT NULL, `idx_residents_quarters(quarters_id)` partial WHERE NOT NULL, `idx_residents_active_name(status, surname, given_names)` partial WHERE `status='ACTIVE'`, `idx_residents_household_status(household_id, status)` partial WHERE NOT NULL, `idx_residents_dob(date_of_birth)`, `idx_residents_clearance(clearance_level, status)` partial WHERE `status='ACTIVE'`, `idx_residents_lineage(id, biological_parent_1_id, biological_parent_2_id)` (covering index for COI/lineage lookups), `idx_residents_entry(entry_type, entry_date)`.
+
+Foreign keys: `biological_parent_1_id`/`biological_parent_2_id` (self-referential), `household_id` → `households(id)`, `quarters_id` → `quarters(id)`, `primary_vocation_id` → `vocations(id)`. Triggers: none.
+
+The `QUARANTINE` status is written by the simulation's illness incident with a raw `UPDATE` (`internal/simulation/incidents.go`); no code path returns a resident to `ACTIVE`.
+
+> ⚠ See [#31](https://github.com/jstephenperry/vt-uos/issues/31).
+
+### `work_assignments`
+
+Assigns a resident to a vocation with shift, status, and performance tracking.
+
+| Column | Type | Constraints | Default |
+| --- | --- | --- | --- |
+| `id` | TEXT | PRIMARY KEY | — |
+| `resident_id` | TEXT | NOT NULL, REFERENCES `residents(id)` | — |
+| `vocation_id` | TEXT | NOT NULL, REFERENCES `vocations(id)` | — |
+| `assignment_type` | TEXT | NOT NULL, CHECK IN (`PRIMARY`,`SECONDARY`,`TEMPORARY`,`TRAINING`) | — |
+| `start_date` | TEXT | NOT NULL | — |
+| `end_date` | TEXT | — | — |
+| `shift` | TEXT | CHECK IN (`ALPHA`,`BETA`,`GAMMA`) | — |
+| `status` | TEXT | NOT NULL, CHECK IN (`ACTIVE`,`ON_LEAVE`,`SUSPENDED`,`COMPLETED`) | `'ACTIVE'` |
+| `performance_rating` | REAL | CHECK BETWEEN 0 AND 5 | — |
+| `assigned_by` | TEXT | REFERENCES `residents(id)` | — |
+| `notes` | TEXT | — | — |
+| `created_at` | TEXT | NOT NULL | `datetime('now')` |
+| `updated_at` | TEXT | NOT NULL | `datetime('now')` |
+
+Indexes (`001_initial.sql`): `idx_work_assignments_resident(resident_id)`, `idx_work_assignments_vocation(vocation_id)`, `idx_work_assignments_status(status)`.
+
+Indexes (`002_performance_hardening.sql`): `idx_work_assignments_resident_active(resident_id, status, shift)` partial WHERE `status='ACTIVE'`, `idx_work_assignments_vocation_active(vocation_id, status, assignment_type)` partial WHERE `status='ACTIVE'`, `idx_work_assignments_shift(shift, status, start_date)` partial WHERE `status='ACTIVE'`, `idx_work_assignments_dates(start_date, end_date)`, `idx_work_assignments_assigned_by(assigned_by)` partial WHERE NOT NULL.
+
+Foreign keys: `resident_id` → `residents(id)`, `vocation_id` → `vocations(id)`, `assigned_by` → `residents(id)`. Triggers: none.
 
 ## Resources
 
-Inventory tracking for all consumables and materials.
+### `resource_categories`
 
-```sql
-CREATE TABLE resource_categories (
-    id TEXT PRIMARY KEY,
-    code TEXT UNIQUE NOT NULL,                        -- "FOOD", "WATER", "MEDICAL", etc.
-    name TEXT NOT NULL,
-    description TEXT,
-    unit_of_measure TEXT NOT NULL,                    -- "kg", "liters", "units", "doses"
-    is_consumable INTEGER NOT NULL DEFAULT 1,
-    is_critical INTEGER NOT NULL DEFAULT 0,           -- Triggers alerts at low levels
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+Top-level classification for consumables and materials (food, water, medical, etc.).
 
-CREATE TABLE resource_items (
-    id TEXT PRIMARY KEY,
-    category_id TEXT NOT NULL REFERENCES resource_categories(id),
-    item_code TEXT UNIQUE NOT NULL,                   -- "FOOD-PROTEIN-001"
-    name TEXT NOT NULL,
-    description TEXT,
-    unit_of_measure TEXT NOT NULL,
-    calories_per_unit REAL,                           -- For food items
-    shelf_life_days INTEGER,                          -- NULL for non-perishables
-    storage_requirements TEXT,                        -- JSON: {"temp_max_c": 4, "humidity_max_pct": 60}
-    is_producible INTEGER NOT NULL DEFAULT 0,         -- Can vault produce this?
-    production_rate_per_day REAL,                     -- If producible
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+| Column | Type | Constraints | Default |
+| --- | --- | --- | --- |
+| `id` | TEXT | PRIMARY KEY | — |
+| `code` | TEXT | UNIQUE NOT NULL | — |
+| `name` | TEXT | NOT NULL | — |
+| `description` | TEXT | — | — |
+| `unit_of_measure` | TEXT | NOT NULL | — |
+| `is_consumable` | INTEGER | NOT NULL | `1` |
+| `is_critical` | INTEGER | NOT NULL | `0` |
+| `created_at` | TEXT | NOT NULL | `datetime('now')` |
 
-CREATE TABLE resource_stocks (
-    id TEXT PRIMARY KEY,
-    item_id TEXT NOT NULL REFERENCES resource_items(id),
-    lot_number TEXT,                                  -- Batch tracking
-    quantity REAL NOT NULL CHECK (quantity >= 0),
-    quantity_reserved REAL NOT NULL DEFAULT 0 CHECK (quantity_reserved >= 0),
-    storage_location TEXT NOT NULL,                   -- "STORAGE-A-12"
-    received_date TEXT NOT NULL,
-    expiration_date TEXT,
-    status TEXT NOT NULL DEFAULT 'AVAILABLE' CHECK (status IN ('AVAILABLE', 'RESERVED', 'QUARANTINE', 'EXPIRED', 'DEPLETED')),
-    last_audit_date TEXT,
-    last_audit_by TEXT REFERENCES residents(id),
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+Indexes: none in either migration. Foreign keys: none. Triggers: none.
 
-CREATE INDEX idx_resource_stocks_item ON resource_stocks(item_id);
-CREATE INDEX idx_resource_stocks_status ON resource_stocks(status);
-CREATE INDEX idx_resource_stocks_expiration ON resource_stocks(expiration_date);
+### `resource_items`
 
-CREATE TABLE resource_transactions (
-    id TEXT PRIMARY KEY,
-    stock_id TEXT REFERENCES resource_stocks(id),     -- NULL for production events
-    item_id TEXT NOT NULL REFERENCES resource_items(id),
-    transaction_type TEXT NOT NULL CHECK (transaction_type IN ('CONSUMPTION', 'PRODUCTION', 'ADJUSTMENT', 'SPOILAGE', 'TRANSFER', 'AUDIT_CORRECTION')),
-    quantity REAL NOT NULL,                           -- Positive for additions, negative for removals
-    balance_after REAL NOT NULL,                      -- Running balance
-    reason TEXT,
-    authorized_by TEXT REFERENCES residents(id),
-    related_entity_type TEXT,                         -- 'RESIDENT', 'HOUSEHOLD', 'FACILITY', etc.
-    related_entity_id TEXT,
-    timestamp TEXT NOT NULL DEFAULT (datetime('now')),
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+A specific stock-keeping unit within a category.
 
-CREATE INDEX idx_resource_transactions_item ON resource_transactions(item_id);
-CREATE INDEX idx_resource_transactions_timestamp ON resource_transactions(timestamp);
-CREATE INDEX idx_resource_transactions_type ON resource_transactions(transaction_type);
-```
+| Column | Type | Constraints | Default |
+| --- | --- | --- | --- |
+| `id` | TEXT | PRIMARY KEY | — |
+| `category_id` | TEXT | NOT NULL, REFERENCES `resource_categories(id)` | — |
+| `item_code` | TEXT | UNIQUE NOT NULL | — |
+| `name` | TEXT | NOT NULL | — |
+| `description` | TEXT | — | — |
+| `unit_of_measure` | TEXT | NOT NULL | — |
+| `calories_per_unit` | REAL | — | — |
+| `shelf_life_days` | INTEGER | — | — |
+| `storage_requirements` | TEXT | — | — |
+| `is_producible` | INTEGER | NOT NULL | `0` |
+| `production_rate_per_day` | REAL | — | — |
+| `created_at` | TEXT | NOT NULL | `datetime('now')` |
+| `updated_at` | TEXT | NOT NULL | `datetime('now')` |
+
+Indexes: `idx_resource_items_category(category_id)` (`001_initial.sql`). No `002` additions.
+
+Foreign keys: `category_id` → `resource_categories(id)`. Triggers: none.
+
+### `resource_stocks`
+
+A physical lot of a resource item, tracked for FIFO consumption and expiration.
+
+| Column | Type | Constraints | Default |
+| --- | --- | --- | --- |
+| `id` | TEXT | PRIMARY KEY | — |
+| `item_id` | TEXT | NOT NULL, REFERENCES `resource_items(id)` | — |
+| `lot_number` | TEXT | — | — |
+| `quantity` | REAL | NOT NULL, CHECK >= 0 | — |
+| `quantity_reserved` | REAL | NOT NULL, CHECK >= 0 | `0` |
+| `storage_location` | TEXT | NOT NULL | — |
+| `received_date` | TEXT | NOT NULL | — |
+| `expiration_date` | TEXT | — | — |
+| `status` | TEXT | NOT NULL, CHECK IN (`AVAILABLE`,`RESERVED`,`QUARANTINE`,`EXPIRED`,`DEPLETED`) | `'AVAILABLE'` |
+| `last_audit_date` | TEXT | — | — |
+| `last_audit_by` | TEXT | REFERENCES `residents(id)` | — |
+| `created_at` | TEXT | NOT NULL | `datetime('now')` |
+| `updated_at` | TEXT | NOT NULL | `datetime('now')` |
+
+Indexes (`001_initial.sql`): `idx_resource_stocks_item(item_id)`, `idx_resource_stocks_status(status)`, `idx_resource_stocks_expiration(expiration_date)`, `idx_resource_stocks_location(storage_location)`.
+
+Indexes (`002_performance_hardening.sql`): `idx_resource_stocks_available(item_id, status, quantity)` partial WHERE `status='AVAILABLE' AND quantity > 0`, `idx_resource_stocks_expiring(status, expiration_date)` partial WHERE `status='AVAILABLE' AND expiration_date IS NOT NULL`, `idx_resource_stocks_fifo(item_id, received_date)` partial WHERE `status='AVAILABLE'`, `idx_resource_stocks_audit(last_audit_by)` partial WHERE NOT NULL.
+
+Foreign keys: `item_id` → `resource_items(id)`, `last_audit_by` → `residents(id)`. Triggers: none.
+
+### `resource_transactions`
+
+Append-only ledger of stock movements (consumption, production, adjustment, spoilage, transfer, audit correction).
+
+| Column | Type | Constraints | Default |
+| --- | --- | --- | --- |
+| `id` | TEXT | PRIMARY KEY | — |
+| `stock_id` | TEXT | REFERENCES `resource_stocks(id)` | — |
+| `item_id` | TEXT | NOT NULL, REFERENCES `resource_items(id)` | — |
+| `transaction_type` | TEXT | NOT NULL, CHECK IN (`CONSUMPTION`,`PRODUCTION`,`ADJUSTMENT`,`SPOILAGE`,`TRANSFER`,`AUDIT_CORRECTION`) | — |
+| `quantity` | REAL | NOT NULL | — |
+| `balance_after` | REAL | NOT NULL | — |
+| `reason` | TEXT | — | — |
+| `authorized_by` | TEXT | REFERENCES `residents(id)` | — |
+| `related_entity_type` | TEXT | — | — |
+| `related_entity_id` | TEXT | — | — |
+| `timestamp` | TEXT | NOT NULL | `datetime('now')` |
+| `created_at` | TEXT | NOT NULL | `datetime('now')` |
+
+Indexes (`001_initial.sql`): `idx_resource_transactions_item(item_id)`, `idx_resource_transactions_timestamp(timestamp)`, `idx_resource_transactions_type(transaction_type)`.
+
+Indexes (`002_performance_hardening.sql`): `idx_resource_transactions_stock(stock_id)` partial WHERE NOT NULL, `idx_resource_transactions_item_time(item_id, timestamp DESC)`, `idx_resource_transactions_type_time(transaction_type, timestamp DESC)`, `idx_resource_transactions_auth(authorized_by, timestamp)` partial WHERE NOT NULL.
+
+Foreign keys: `stock_id` → `resource_stocks(id)` (nullable — NULL represents a production event with no source lot), `item_id` → `resource_items(id)`, `authorized_by` → `residents(id)`. Triggers: none.
 
 ## Facility Systems
 
-Infrastructure monitoring and maintenance.
+### `facility_systems`
 
-```sql
-CREATE TABLE facility_systems (
-    id TEXT PRIMARY KEY,
-    system_code TEXT UNIQUE NOT NULL,                 -- "PWR-REACTOR-01"
-    name TEXT NOT NULL,
-    category TEXT NOT NULL CHECK (category IN ('POWER', 'WATER', 'HVAC', 'SECURITY', 'MEDICAL', 'FOOD_PRODUCTION', 'WASTE', 'COMMUNICATIONS', 'STRUCTURAL')),
-    location_sector TEXT NOT NULL,
-    location_level INTEGER NOT NULL,
-    
-    -- Status
-    status TEXT NOT NULL DEFAULT 'OPERATIONAL' CHECK (status IN ('OPERATIONAL', 'DEGRADED', 'MAINTENANCE', 'OFFLINE', 'FAILED', 'DESTROYED')),
-    efficiency_percent REAL NOT NULL DEFAULT 100.0 CHECK (efficiency_percent BETWEEN 0 AND 100),
-    
-    -- Specifications
-    capacity_rating REAL,                             -- Depends on system type
-    capacity_unit TEXT,                               -- "kW", "liters/day", etc.
-    current_output REAL,
-    
-    -- Maintenance
-    install_date TEXT NOT NULL,
-    last_maintenance_date TEXT,
-    next_maintenance_due TEXT,
-    maintenance_interval_days INTEGER NOT NULL DEFAULT 90,
-    mtbf_hours INTEGER,                               -- Mean time between failures
-    total_runtime_hours REAL NOT NULL DEFAULT 0,
-    
-    -- Telemetry (latest readings)
-    telemetry_json TEXT,                              -- System-specific sensor data
-    telemetry_updated_at TEXT,
-    
-    notes TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+Infrastructure units (power, water, HVAC, security, medical, food production, waste, communications, structural) monitored for status and maintenance.
 
-CREATE INDEX idx_facility_systems_category ON facility_systems(category);
-CREATE INDEX idx_facility_systems_status ON facility_systems(status);
+| Column | Type | Constraints | Default |
+| --- | --- | --- | --- |
+| `id` | TEXT | PRIMARY KEY | — |
+| `system_code` | TEXT | UNIQUE NOT NULL | — |
+| `name` | TEXT | NOT NULL | — |
+| `category` | TEXT | NOT NULL, CHECK IN (`POWER`,`WATER`,`HVAC`,`SECURITY`,`MEDICAL`,`FOOD_PRODUCTION`,`WASTE`,`COMMUNICATIONS`,`STRUCTURAL`) | — |
+| `location_sector` | TEXT | NOT NULL | — |
+| `location_level` | INTEGER | NOT NULL | — |
+| `status` | TEXT | NOT NULL, CHECK IN (`OPERATIONAL`,`DEGRADED`,`MAINTENANCE`,`OFFLINE`,`FAILED`,`DESTROYED`) | `'OPERATIONAL'` |
+| `efficiency_percent` | REAL | NOT NULL, CHECK BETWEEN 0 AND 100 | `100.0` |
+| `capacity_rating` | REAL | — | — |
+| `capacity_unit` | TEXT | — | — |
+| `current_output` | REAL | — | — |
+| `install_date` | TEXT | NOT NULL | — |
+| `last_maintenance_date` | TEXT | — | — |
+| `next_maintenance_due` | TEXT | — | — |
+| `maintenance_interval_days` | INTEGER | NOT NULL | `90` |
+| `mtbf_hours` | INTEGER | — | — |
+| `total_runtime_hours` | REAL | NOT NULL | `0` |
+| `telemetry_json` | TEXT | — | — |
+| `telemetry_updated_at` | TEXT | — | — |
+| `notes` | TEXT | — | — |
+| `created_at` | TEXT | NOT NULL | `datetime('now')` |
+| `updated_at` | TEXT | NOT NULL | `datetime('now')` |
 
-CREATE TABLE maintenance_records (
-    id TEXT PRIMARY KEY,
-    system_id TEXT NOT NULL REFERENCES facility_systems(id),
-    maintenance_type TEXT NOT NULL CHECK (maintenance_type IN ('PREVENTIVE', 'CORRECTIVE', 'EMERGENCY', 'INSPECTION', 'UPGRADE')),
-    
-    -- Work details
-    description TEXT NOT NULL,
-    work_performed TEXT,
-    parts_consumed TEXT,                              -- JSON array of {item_id, quantity}
-    
-    -- Personnel
-    lead_technician_id TEXT REFERENCES residents(id),
-    crew_member_ids TEXT,                             -- JSON array of resident IDs
-    
-    -- Timing
-    scheduled_date TEXT,
-    started_at TEXT,
-    completed_at TEXT,
-    estimated_hours REAL,
-    actual_hours REAL,
-    
-    -- Outcome
-    outcome TEXT CHECK (outcome IN ('COMPLETED', 'PARTIAL', 'FAILED', 'DEFERRED', 'CANCELLED')),
-    system_status_before TEXT,
-    system_status_after TEXT,
-    efficiency_before REAL,
-    efficiency_after REAL,
-    
-    notes TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+Indexes (`001_initial.sql`): `idx_facility_systems_category(category)`, `idx_facility_systems_status(status)`.
 
-CREATE INDEX idx_maintenance_records_system ON maintenance_records(system_id);
-CREATE INDEX idx_maintenance_records_type ON maintenance_records(maintenance_type);
-```
+Indexes (`002_performance_hardening.sql`): `idx_facility_critical(category, status, efficiency_percent)` partial WHERE `category IN ('POWER','WATER','HVAC','WASTE','SECURITY')`, `idx_facility_maintenance_due(next_maintenance_due, status)` partial WHERE `status IN ('OPERATIONAL','DEGRADED')`, `idx_facility_location(location_sector, location_level)`, `idx_facility_degraded(status, efficiency_percent)` partial WHERE `status='DEGRADED' OR efficiency_percent < 80`.
+
+Foreign keys: none. Triggers: none.
+
+`telemetry_json`/`telemetry_updated_at` are declared columns with no reader or writer anywhere in the Go code — `internal/repository/facility_repo.go`'s INSERT/SELECT/UPDATE column lists and `internal/models/facility.go`'s struct both omit them entirely.
+
+> ⚠ See [#24](https://github.com/jstephenperry/vt-uos/issues/24).
+
+### `maintenance_records`
+
+A work order against a `facility_systems` row.
+
+| Column | Type | Constraints | Default |
+| --- | --- | --- | --- |
+| `id` | TEXT | PRIMARY KEY | — |
+| `system_id` | TEXT | NOT NULL, REFERENCES `facility_systems(id)` | — |
+| `maintenance_type` | TEXT | NOT NULL, CHECK IN (`PREVENTIVE`,`CORRECTIVE`,`EMERGENCY`,`INSPECTION`,`UPGRADE`) | — |
+| `description` | TEXT | NOT NULL | — |
+| `work_performed` | TEXT | — | — |
+| `parts_consumed` | TEXT | — | — |
+| `lead_technician_id` | TEXT | REFERENCES `residents(id)` | — |
+| `crew_member_ids` | TEXT | — | — |
+| `scheduled_date` | TEXT | — | — |
+| `started_at` | TEXT | — | — |
+| `completed_at` | TEXT | — | — |
+| `estimated_hours` | REAL | — | — |
+| `actual_hours` | REAL | — | — |
+| `outcome` | TEXT | CHECK IN (`COMPLETED`,`PARTIAL`,`FAILED`,`DEFERRED`,`CANCELLED`) | — |
+| `system_status_before` | TEXT | — | — |
+| `system_status_after` | TEXT | — | — |
+| `efficiency_before` | REAL | — | — |
+| `efficiency_after` | REAL | — | — |
+| `notes` | TEXT | — | — |
+| `created_at` | TEXT | NOT NULL | `datetime('now')` |
+| `updated_at` | TEXT | NOT NULL | `datetime('now')` |
+
+Indexes (`001_initial.sql`): `idx_maintenance_records_system(system_id)`, `idx_maintenance_records_type(maintenance_type)`.
+
+Indexes (`002_performance_hardening.sql`): `idx_maintenance_technician(lead_technician_id)` partial WHERE NOT NULL, `idx_maintenance_scheduled(scheduled_date, system_id)` partial WHERE `outcome IS NULL`, `idx_maintenance_completed(system_id, completed_at DESC)` partial WHERE `completed_at IS NOT NULL`, `idx_maintenance_outcome(outcome, maintenance_type)`.
+
+Foreign keys: `system_id` → `facility_systems(id)`, `lead_technician_id` → `residents(id)`. Triggers: none.
 
 ## Medical Records
 
-Health tracking and epidemiology.
+### `medical_records`
 
-```sql
-CREATE TABLE medical_records (
-    id TEXT PRIMARY KEY,
-    resident_id TEXT NOT NULL REFERENCES residents(id),
-    record_type TEXT NOT NULL CHECK (record_type IN ('EXAMINATION', 'TREATMENT', 'VACCINATION', 'INCIDENT', 'PSYCHOLOGICAL', 'RADIATION', 'CHRONIC_CONDITION', 'LAB_RESULT')),
-    
-    -- Clinical data
-    chief_complaint TEXT,
-    diagnosis_codes TEXT,                             -- JSON array of ICD-like codes
-    diagnosis_text TEXT,
-    treatment_provided TEXT,
-    medications_prescribed TEXT,                      -- JSON array
-    
-    -- Vital signs (if applicable)
-    vitals_json TEXT,                                 -- {"bp": "120/80", "hr": 72, "temp_c": 36.8, ...}
-    
-    -- Radiation tracking
-    radiation_dose_msv REAL,                          -- Millisieverts this exposure
-    radiation_cumulative_msv REAL,                    -- Running lifetime total
-    
-    -- Provider
-    provider_id TEXT REFERENCES residents(id),
-    facility_location TEXT,
-    
-    -- Timing
-    encounter_date TEXT NOT NULL,
-    follow_up_date TEXT,
-    
-    -- Status
-    status TEXT NOT NULL DEFAULT 'ACTIVE' CHECK (status IN ('ACTIVE', 'RESOLVED', 'CHRONIC', 'FOLLOW_UP_REQUIRED')),
-    confidentiality_level INTEGER NOT NULL DEFAULT 1, -- Higher = more restricted
-    
-    notes TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+An encounter record: examination, treatment, vaccination, incident, psychological, radiation, chronic condition, or lab result.
 
-CREATE INDEX idx_medical_records_resident ON medical_records(resident_id);
-CREATE INDEX idx_medical_records_type ON medical_records(record_type);
-CREATE INDEX idx_medical_records_date ON medical_records(encounter_date);
+| Column | Type | Constraints | Default |
+| --- | --- | --- | --- |
+| `id` | TEXT | PRIMARY KEY | — |
+| `resident_id` | TEXT | NOT NULL, REFERENCES `residents(id)` | — |
+| `record_type` | TEXT | NOT NULL, CHECK IN (`EXAMINATION`,`TREATMENT`,`VACCINATION`,`INCIDENT`,`PSYCHOLOGICAL`,`RADIATION`,`CHRONIC_CONDITION`,`LAB_RESULT`) | — |
+| `chief_complaint` | TEXT | — | — |
+| `diagnosis_codes` | TEXT | — | — |
+| `diagnosis_text` | TEXT | — | — |
+| `treatment_provided` | TEXT | — | — |
+| `medications_prescribed` | TEXT | — | — |
+| `vitals_json` | TEXT | — | — |
+| `radiation_dose_msv` | REAL | — | — |
+| `radiation_cumulative_msv` | REAL | — | — |
+| `provider_id` | TEXT | REFERENCES `residents(id)` | — |
+| `facility_location` | TEXT | — | — |
+| `encounter_date` | TEXT | NOT NULL | — |
+| `follow_up_date` | TEXT | — | — |
+| `status` | TEXT | NOT NULL, CHECK IN (`ACTIVE`,`RESOLVED`,`CHRONIC`,`FOLLOW_UP_REQUIRED`) | `'ACTIVE'` |
+| `confidentiality_level` | INTEGER | NOT NULL | `1` |
+| `notes` | TEXT | — | — |
+| `created_at` | TEXT | NOT NULL | `datetime('now')` |
+| `updated_at` | TEXT | NOT NULL | `datetime('now')` |
 
-CREATE TABLE medical_conditions (
-    id TEXT PRIMARY KEY,
-    resident_id TEXT NOT NULL REFERENCES residents(id),
-    condition_code TEXT NOT NULL,
-    condition_name TEXT NOT NULL,
-    onset_date TEXT NOT NULL,
-    resolution_date TEXT,                             -- NULL if ongoing
-    severity TEXT NOT NULL CHECK (severity IN ('MILD', 'MODERATE', 'SEVERE', 'CRITICAL')),
-    is_chronic INTEGER NOT NULL DEFAULT 0,
-    is_genetic INTEGER NOT NULL DEFAULT 0,            -- Hereditary condition
-    is_contagious INTEGER NOT NULL DEFAULT 0,
-    treatment_plan TEXT,
-    notes TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+Indexes (`001_initial.sql`): `idx_medical_records_resident(resident_id)`, `idx_medical_records_type(record_type)`, `idx_medical_records_date(encounter_date)`.
 
-CREATE INDEX idx_medical_conditions_resident ON medical_conditions(resident_id);
-CREATE INDEX idx_medical_conditions_chronic ON medical_conditions(is_chronic);
-CREATE INDEX idx_medical_conditions_contagious ON medical_conditions(is_contagious);
-```
+Indexes (`002_performance_hardening.sql`): `idx_medical_patient_history(resident_id, encounter_date DESC)`, `idx_medical_patient_type(resident_id, record_type, encounter_date DESC)`, `idx_medical_provider(provider_id, encounter_date)` partial WHERE NOT NULL, `idx_medical_followup(follow_up_date, status)` partial WHERE `follow_up_date IS NOT NULL AND status='FOLLOW_UP_REQUIRED'`, `idx_medical_radiation(resident_id, radiation_cumulative_msv)` partial WHERE `radiation_dose_msv IS NOT NULL`.
+
+Foreign keys: `resident_id` → `residents(id)`, `provider_id` → `residents(id)`. Triggers: none.
+
+### `medical_conditions`
+
+A diagnosed condition tracked over time, including whether it is chronic, genetic, or contagious.
+
+| Column | Type | Constraints | Default |
+| --- | --- | --- | --- |
+| `id` | TEXT | PRIMARY KEY | — |
+| `resident_id` | TEXT | NOT NULL, REFERENCES `residents(id)` | — |
+| `condition_code` | TEXT | NOT NULL | — |
+| `condition_name` | TEXT | NOT NULL | — |
+| `onset_date` | TEXT | NOT NULL | — |
+| `resolution_date` | TEXT | — | — |
+| `severity` | TEXT | NOT NULL, CHECK IN (`MILD`,`MODERATE`,`SEVERE`,`CRITICAL`) | — |
+| `is_chronic` | INTEGER | NOT NULL | `0` |
+| `is_genetic` | INTEGER | NOT NULL | `0` |
+| `is_contagious` | INTEGER | NOT NULL | `0` |
+| `treatment_plan` | TEXT | — | — |
+| `notes` | TEXT | — | — |
+| `created_at` | TEXT | NOT NULL | `datetime('now')` |
+| `updated_at` | TEXT | NOT NULL | `datetime('now')` |
+
+Indexes (`001_initial.sql`): `idx_medical_conditions_resident(resident_id)`, `idx_medical_conditions_chronic(is_chronic)`, `idx_medical_conditions_contagious(is_contagious)`.
+
+Indexes (`002_performance_hardening.sql`): `idx_conditions_chronic(resident_id, is_chronic, severity)` partial WHERE `resolution_date IS NULL`, `idx_conditions_contagious(is_contagious, onset_date, severity)` partial WHERE `is_contagious=1 AND resolution_date IS NULL`, `idx_conditions_genetic(is_genetic, condition_code)` partial WHERE `is_genetic=1`, `idx_conditions_severe(severity, resident_id)` partial WHERE `severity IN ('SEVERE','CRITICAL') AND resolution_date IS NULL`.
+
+Foreign keys: `resident_id` → `residents(id)`. Triggers: none.
 
 ## Security & Access Control
 
+### `security_zones`
+
+A controlled-access area within the vault.
+
+| Column | Type | Constraints | Default |
+| --- | --- | --- | --- |
+| `id` | TEXT | PRIMARY KEY | — |
+| `zone_code` | TEXT | UNIQUE NOT NULL | — |
+| `name` | TEXT | NOT NULL | — |
+| `description` | TEXT | — | — |
+| `sector` | TEXT | NOT NULL | — |
+| `required_clearance` | INTEGER | NOT NULL | `1` |
+| `is_restricted` | INTEGER | NOT NULL | `0` |
+| `access_schedule` | TEXT | — | — |
+| `created_at` | TEXT | NOT NULL | `datetime('now')` |
+
+Indexes: none in `001_initial.sql`; `idx_zones_sector(sector, required_clearance)`, `idx_zones_restricted(is_restricted, required_clearance)` partial WHERE `is_restricted=1` (`002_performance_hardening.sql`).
+
+Foreign keys: none. Triggers: none.
+
+### `access_log`
+
+Entry/exit events at a zone checkpoint.
+
+| Column | Type | Constraints | Default |
+| --- | --- | --- | --- |
+| `id` | TEXT | PRIMARY KEY | — |
+| `resident_id` | TEXT | NOT NULL, REFERENCES `residents(id)` | — |
+| `zone_id` | TEXT | NOT NULL, REFERENCES `security_zones(id)` | — |
+| `access_point` | TEXT | NOT NULL | — |
+| `direction` | TEXT | NOT NULL, CHECK IN (`ENTRY`,`EXIT`) | — |
+| `access_result` | TEXT | NOT NULL, CHECK IN (`GRANTED`,`DENIED`,`OVERRIDE`,`EMERGENCY`) | — |
+| `denial_reason` | TEXT | — | — |
+| `override_by` | TEXT | REFERENCES `residents(id)` | — |
+| `timestamp` | TEXT | NOT NULL | `datetime('now')` |
+
+Indexes: `idx_access_log_resident(resident_id)`, `idx_access_log_zone(zone_id)`, `idx_access_log_timestamp(timestamp)`, `idx_access_log_result(access_result)` (`001_initial.sql`). `002_performance_hardening.sql` drops `idx_access_log_resident` and `idx_access_log_zone` as redundant and replaces them with composites: `idx_access_resident_time(resident_id, timestamp DESC)`, `idx_access_zone_time(zone_id, timestamp DESC)`, `idx_access_denied(access_result, timestamp DESC)` partial WHERE `access_result IN ('DENIED','OVERRIDE','EMERGENCY')`. `idx_access_log_timestamp` and `idx_access_log_result` from `001` are never dropped and remain live alongside the new composites.
+
+Foreign keys: `resident_id` → `residents(id)`, `zone_id` → `security_zones(id)`, `override_by` → `residents(id)`. Triggers: none.
+
+### `security_incidents`
+
+A logged incident (altercation, theft, vandalism, unauthorized access, contraband, insubordination, assault, other) with investigation/resolution state.
+
+| Column | Type | Constraints | Default |
+| --- | --- | --- | --- |
+| `id` | TEXT | PRIMARY KEY | — |
+| `incident_number` | TEXT | UNIQUE NOT NULL | — |
+| `incident_type` | TEXT | NOT NULL, CHECK IN (`ALTERCATION`,`THEFT`,`VANDALISM`,`UNAUTHORIZED_ACCESS`,`CONTRABAND`,`INSUBORDINATION`,`ASSAULT`,`OTHER`) | — |
+| `severity` | TEXT | NOT NULL, CHECK IN (`MINOR`,`MODERATE`,`MAJOR`,`CRITICAL`) | — |
+| `description` | TEXT | NOT NULL | — |
+| `location_sector` | TEXT | — | — |
+| `location_detail` | TEXT | — | — |
+| `reported_by` | TEXT | REFERENCES `residents(id)` | — |
+| `involved_resident_ids` | TEXT | — | — |
+| `witness_resident_ids` | TEXT | — | — |
+| `responding_officer_ids` | TEXT | — | — |
+| `status` | TEXT | NOT NULL, CHECK IN (`OPEN`,`INVESTIGATING`,`PENDING_REVIEW`,`RESOLVED`,`CLOSED`) | `'OPEN'` |
+| `resolution` | TEXT | — | — |
+| `disciplinary_action` | TEXT | — | — |
+| `occurred_at` | TEXT | NOT NULL | — |
+| `reported_at` | TEXT | NOT NULL | — |
+| `resolved_at` | TEXT | — | — |
+| `notes` | TEXT | — | — |
+| `created_at` | TEXT | NOT NULL | `datetime('now')` |
+| `updated_at` | TEXT | NOT NULL | `datetime('now')` |
+
+Indexes (`001_initial.sql`): `idx_security_incidents_type(incident_type)`, `idx_security_incidents_status(status)`, `idx_security_incidents_occurred(occurred_at)`.
+
+Indexes (`002_performance_hardening.sql`): `idx_incidents_open(status, severity, occurred_at DESC)` partial WHERE `status NOT IN ('RESOLVED','CLOSED')`, `idx_incidents_reporter(reported_by)` partial WHERE NOT NULL, `idx_incidents_location(location_sector, occurred_at DESC)`.
+
+Foreign keys: `reported_by` → `residents(id)`. `involved_resident_ids`/`witness_resident_ids`/`responding_officer_ids` are freeform TEXT columns (JSON arrays of ids), not enforced foreign keys. Triggers: none.
+
+## Governance
+
+### `directives`
+
+An Overseer/department-head/Vault-Tec-Central policy document with a lifecycle (draft → active → suspended/superseded/rescinded).
+
+| Column | Type | Constraints | Default |
+| --- | --- | --- | --- |
+| `id` | TEXT | PRIMARY KEY | — |
+| `directive_number` | TEXT | UNIQUE NOT NULL | — |
+| `directive_type` | TEXT | NOT NULL, CHECK IN (`POLICY`,`EMERGENCY`,`OPERATIONAL`,`PERSONNEL`,`RESOURCE`,`SECURITY`) | — |
+| `title` | TEXT | NOT NULL | — |
+| `summary` | TEXT | NOT NULL | — |
+| `full_text` | TEXT | NOT NULL | — |
+| `issued_by` | TEXT | NOT NULL, REFERENCES `residents(id)` | — |
+| `authority_level` | TEXT | NOT NULL, CHECK IN (`OVERSEER`,`DEPARTMENT_HEAD`,`VAULT_TEC_CENTRAL`) | — |
+| `affected_departments` | TEXT | — | — |
+| `affected_clearance_levels` | TEXT | — | — |
+| `status` | TEXT | NOT NULL, CHECK IN (`DRAFT`,`ACTIVE`,`SUSPENDED`,`SUPERSEDED`,`RESCINDED`) | `'DRAFT'` |
+| `effective_date` | TEXT | — | — |
+| `expiration_date` | TEXT | — | — |
+| `supersedes_directive_id` | TEXT | REFERENCES `directives(id)` | — |
+| `superseded_by_directive_id` | TEXT | REFERENCES `directives(id)` | — |
+| `classification_level` | TEXT | NOT NULL, CHECK IN (`GENERAL`,`RESTRICTED`,`CONFIDENTIAL`,`OVERSEER_ONLY`) | `'GENERAL'` |
+| `created_at` | TEXT | NOT NULL | `datetime('now')` |
+| `updated_at` | TEXT | NOT NULL | `datetime('now')` |
+
+Indexes (`001_initial.sql`): `idx_directives_type(directive_type)`, `idx_directives_status(status)`, `idx_directives_classification(classification_level)`.
+
+Indexes (`002_performance_hardening.sql`): `idx_directives_active(status, effective_date, classification_level)` partial WHERE `status='ACTIVE'`, `idx_directives_author(issued_by, status)`, `idx_directives_expiring(expiration_date, status)` partial WHERE `expiration_date IS NOT NULL AND status='ACTIVE'`.
+
+Foreign keys: `issued_by` → `residents(id)`, `supersedes_directive_id`/`superseded_by_directive_id` (self-referential). Triggers: none.
+
+## Audit Log
+
+### `audit_log`
+
+Append-only record of create/update/delete/login/logout-style actions across the system.
+
+| Column | Type | Constraints | Default |
+| --- | --- | --- | --- |
+| `id` | TEXT | PRIMARY KEY | — |
+| `timestamp` | TEXT | NOT NULL | `datetime('now')` |
+| `actor_type` | TEXT | NOT NULL, CHECK IN (`USER`,`SYSTEM`,`SIMULATION`) | — |
+| `actor_id` | TEXT | — | — |
+| `action` | TEXT | NOT NULL | — |
+| `entity_type` | TEXT | NOT NULL | — |
+| `entity_id` | TEXT | NOT NULL | — |
+| `old_values` | TEXT | — | — |
+| `new_values` | TEXT | — | — |
+| `session_id` | TEXT | — | — |
+| `ip_address` | TEXT | — | — |
+| `terminal_id` | TEXT | — | — |
+
+Indexes (`001_initial.sql`): `idx_audit_log_timestamp(timestamp)`, `idx_audit_log_actor(actor_id)`, `idx_audit_log_entity(entity_type, entity_id)`.
+
+`002_performance_hardening.sql` drops `idx_audit_log_entity` and replaces it with `idx_audit_entity_time(entity_type, entity_id, timestamp DESC)`; it also adds `idx_audit_actor_time(actor_id, timestamp DESC)` partial WHERE NOT NULL and `idx_audit_action_time(action, timestamp DESC)`. `idx_audit_log_timestamp` and `idx_audit_log_actor` from `001` are not dropped and remain live.
+
+Foreign keys: none — `entity_type` stores a table name as free text rather than a typed reference, and `entity_id` is not constrained to any single table's primary key. Triggers: none (nothing in the schema or Go code prevents `UPDATE`/`DELETE` against this table; "immutable" is a convention, not an enforced property).
+
+## Simulation State
+
+### `simulation_events`
+
+A queued or completed simulation event (used by the control-core engine's event log).
+
+| Column | Type | Constraints | Default |
+| --- | --- | --- | --- |
+| `id` | TEXT | PRIMARY KEY | — |
+| `event_type` | TEXT | NOT NULL | — |
+| `scheduled_time` | TEXT | NOT NULL | — |
+| `processed_at` | TEXT | — | — |
+| `status` | TEXT | NOT NULL, CHECK IN (`PENDING`,`PROCESSING`,`COMPLETED`,`FAILED`,`CANCELLED`) | `'PENDING'` |
+| `priority` | INTEGER | NOT NULL | `0` |
+| `payload` | TEXT | — | — |
+| `result` | TEXT | — | — |
+| `error_message` | TEXT | — | — |
+| `created_at` | TEXT | NOT NULL | `datetime('now')` |
+
+Indexes (`001_initial.sql`): `idx_simulation_events_status(status)`, `idx_simulation_events_scheduled(scheduled_time)`.
+
+Indexes (`002_performance_hardening.sql`): `idx_sim_queue(status, priority DESC, scheduled_time)` partial WHERE `status='PENDING'`, `idx_sim_type_time(event_type, scheduled_time DESC)`, `idx_sim_failed(status, scheduled_time)` partial WHERE `status='FAILED'`.
+
+Foreign keys: none. Triggers: none.
+
+The simulation engine writes rows here for completed events (`id`, `event_type`, `scheduled_time`, `processed_at`, `status='COMPLETED'`, `priority`, `payload`, `result`, `created_at`) and, alongside each, an `audit_log` row with `actor_type='SIMULATION'`, `actor_id='control-core'`, `terminal_id='SIM'` (`internal/simulation/events.go`).
+
+## PRAGMAs
+
+Every `database.Open` call runs eight pragmas, in this order (`internal/database/database.go`), each with the rationale given in the code's own comments:
+
+| Pragma | Value | Rationale (from code comment) |
+| --- | --- | --- |
+| `journal_mode` | `WAL` | "WAL mode for power-loss resilience" |
+| `synchronous` | `NORMAL` | "Synchronous NORMAL balances safety and performance" |
+| `busy_timeout` | `5000` | "5 second busy timeout for concurrent access" |
+| `foreign_keys` | `ON` | "Enable foreign key constraints" |
+| `page_size` | `4096` | "Use 4KB page size (matches typical filesystem block size)" |
+| `cache_size` | `-16000` (16MB) | "16MB cache for good performance" |
+| `mmap_size` | `268435456` (256MB) | "Enable memory-mapped I/O for reads (256MB)" |
+| `secure_delete` | `ON` | "Secure delete for sensitive data" |
+
+Any pragma failure aborts `Open` with a wrapped error (`internal/database/database.go`).
+
+The connection string also carries `_txlock=immediate&_timeout=5000&_fk=true` (`internal/database/database.go`), and the pool is capped to `SetMaxOpenConns(1)` / `SetMaxIdleConns(1)` — SQLite supports only one writer, so the process holds a single connection (`internal/database/database.go`). A separate in-memory test helper (`internal/database/testhelper.go`) opens `:memory:` and sets only `PRAGMA foreign_keys = ON` — no WAL, synchronous, or other pragma, since `:memory:` cannot use WAL.
+
+> ⚠ See [#15](https://github.com/jstephenperry/vt-uos/issues/15) and [#46](https://github.com/jstephenperry/vt-uos/issues/46).
+
+## Migration mechanism
+
+Migrations are embedded at compile time via `//go:embed migrations/*.sql` (`internal/database/migrate.go`) and discovered by matching each embedded filename against `^(\d{3})_(.+)\.sql$`; a non-matching filename is skipped with a `slog.Warn` rather than failing the load (`internal/database/migrate.go`). Each file is split into an "up" and a "down" section on the literal markers `-- +migrate Up` / `-- +migrate Down` (`internal/database/migrate.go`); both shipped files use `Up` before `Down`.
+
+Applied migrations are tracked in a table created directly by Go code (not by a migration file itself) the first time a `Migrator` is constructed:
+
 ```sql
-CREATE TABLE security_zones (
-    id TEXT PRIMARY KEY,
-    zone_code TEXT UNIQUE NOT NULL,                   -- "ZONE-ALPHA-1"
-    name TEXT NOT NULL,
-    description TEXT,
-    sector TEXT NOT NULL,
-    required_clearance INTEGER NOT NULL DEFAULT 1,
-    is_restricted INTEGER NOT NULL DEFAULT 0,
-    access_schedule TEXT,                             -- JSON: when zone is accessible
-    created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE access_log (
-    id TEXT PRIMARY KEY,
-    resident_id TEXT NOT NULL REFERENCES residents(id),
-    zone_id TEXT NOT NULL REFERENCES security_zones(id),
-    access_point TEXT NOT NULL,                       -- Door/checkpoint ID
-    direction TEXT NOT NULL CHECK (direction IN ('ENTRY', 'EXIT')),
-    access_result TEXT NOT NULL CHECK (access_result IN ('GRANTED', 'DENIED', 'OVERRIDE', 'EMERGENCY')),
-    denial_reason TEXT,
-    override_by TEXT REFERENCES residents(id),        -- Who authorized override
-    timestamp TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE INDEX idx_access_log_resident ON access_log(resident_id);
-CREATE INDEX idx_access_log_zone ON access_log(zone_id);
-CREATE INDEX idx_access_log_timestamp ON access_log(timestamp);
-CREATE INDEX idx_access_log_result ON access_log(access_result);
-
-CREATE TABLE security_incidents (
-    id TEXT PRIMARY KEY,
-    incident_number TEXT UNIQUE NOT NULL,             -- "SI-2077-0042"
-    incident_type TEXT NOT NULL CHECK (incident_type IN ('ALTERCATION', 'THEFT', 'VANDALISM', 'UNAUTHORIZED_ACCESS', 'CONTRABAND', 'INSUBORDINATION', 'ASSAULT', 'OTHER')),
-    severity TEXT NOT NULL CHECK (severity IN ('MINOR', 'MODERATE', 'MAJOR', 'CRITICAL')),
-    
-    -- Details
+CREATE TABLE IF NOT EXISTS schema_migrations (
+    version INTEGER PRIMARY KEY,
     description TEXT NOT NULL,
-    location_sector TEXT,
-    location_detail TEXT,
-    
-    -- Parties involved
-    reported_by TEXT REFERENCES residents(id),
-    involved_resident_ids TEXT,                       -- JSON array
-    witness_resident_ids TEXT,                        -- JSON array
-    responding_officer_ids TEXT,                      -- JSON array
-    
-    -- Resolution
-    status TEXT NOT NULL DEFAULT 'OPEN' CHECK (status IN ('OPEN', 'INVESTIGATING', 'PENDING_REVIEW', 'RESOLVED', 'CLOSED')),
-    resolution TEXT,
-    disciplinary_action TEXT,
-    
-    -- Timing
-    occurred_at TEXT NOT NULL,
-    reported_at TEXT NOT NULL,
-    resolved_at TEXT,
-    
-    notes TEXT,
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE INDEX idx_security_incidents_type ON security_incidents(incident_type);
-CREATE INDEX idx_security_incidents_status ON security_incidents(status);
-CREATE INDEX idx_security_incidents_occurred ON security_incidents(occurred_at);
+    applied_at TEXT NOT NULL DEFAULT (datetime('now')),
+    checksum TEXT
+)
 ```
 
-## Governance & Directives
+(`internal/database/migrate.go`). The current schema version is `SELECT COALESCE(MAX(version), 0) FROM schema_migrations`, defaulting to 0 on an empty table (`internal/database/migrate.go`). `checksum` is declared but never populated — `applyMigration`'s `INSERT INTO schema_migrations` supplies only `version` and `description` — and is never read or compared anywhere, so edited migration content between deployments would not be detected.
 
-```sql
-CREATE TABLE directives (
-    id TEXT PRIMARY KEY,
-    directive_number TEXT UNIQUE NOT NULL,            -- "OD-2077-001" (Overseer Directive)
-    directive_type TEXT NOT NULL CHECK (directive_type IN ('POLICY', 'EMERGENCY', 'OPERATIONAL', 'PERSONNEL', 'RESOURCE', 'SECURITY')),
-    title TEXT NOT NULL,
-    
-    -- Content
-    summary TEXT NOT NULL,
-    full_text TEXT NOT NULL,
-    
-    -- Authority
-    issued_by TEXT NOT NULL REFERENCES residents(id),
-    authority_level TEXT NOT NULL CHECK (authority_level IN ('OVERSEER', 'DEPARTMENT_HEAD', 'VAULT_TEC_CENTRAL')),
-    
-    -- Scope
-    affected_departments TEXT,                        -- JSON array, NULL = all
-    affected_clearance_levels TEXT,                   -- JSON array, NULL = all
-    
-    -- Lifecycle
-    status TEXT NOT NULL DEFAULT 'DRAFT' CHECK (status IN ('DRAFT', 'ACTIVE', 'SUSPENDED', 'SUPERSEDED', 'RESCINDED')),
-    effective_date TEXT,
-    expiration_date TEXT,
-    supersedes_directive_id TEXT REFERENCES directives(id),
-    superseded_by_directive_id TEXT REFERENCES directives(id),
-    
-    -- Classification
-    classification_level TEXT NOT NULL DEFAULT 'GENERAL' CHECK (classification_level IN ('GENERAL', 'RESTRICTED', 'CONFIDENTIAL', 'OVERSEER_ONLY')),
-    
-    created_at TEXT NOT NULL DEFAULT (datetime('now')),
-    updated_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
+> ⚠ See [#44](https://github.com/jstephenperry/vt-uos/issues/44).
 
-CREATE INDEX idx_directives_type ON directives(directive_type);
-CREATE INDEX idx_directives_status ON directives(status);
-CREATE INDEX idx_directives_classification ON directives(classification_level);
-```
+`MigrateUp` applies each pending migration (`version > current`) in its own call to `applyMigration`, and **each migration file is its own transaction** — a later migration failing leaves earlier ones in the batch already committed, it does not roll back the whole run (`internal/database/migrate.go`). Inside a transaction, the up-SQL is split into individual statements by a hand-rolled `splitStatements` that walks the SQL text byte-by-byte, toggling an in-string flag on `'`/`"` and splitting on top-level `;` (`internal/database/migrate.go`); it does not strip `--` line comments before splitting, and it treats a preceding backslash — not SQL's standard doubled-quote — as the string-escape character, so a future migration with a literal apostrophe or an inline comment containing a semicolon could be mis-split. After all statements in a migration run successfully, its `(version, description)` row is inserted into `schema_migrations` in the same transaction; if any statement fails, `WithTransaction` rolls the whole migration back and no row is recorded for it (`internal/database/database.go`, `internal/database/migrate.go`). `MigrateDown`, `MigrateTo`, `DryRun`, and `Status` are exported and implemented (rollback of the top applied version, migration to an arbitrary target, dry-run listing, and full status) but have no caller anywhere outside `migrate.go` itself and its tests — the CLI only ever calls `MigrateUp` (`cmd/vtuos/main.go`).
 
-## Audit Log (Immutable)
+> ⚠ See [#25](https://github.com/jstephenperry/vt-uos/issues/25) and [#44](https://github.com/jstephenperry/vt-uos/issues/44).
 
-```sql
-CREATE TABLE audit_log (
-    id TEXT PRIMARY KEY,
-    timestamp TEXT NOT NULL DEFAULT (datetime('now')),
-    
-    -- Actor
-    actor_type TEXT NOT NULL CHECK (actor_type IN ('USER', 'SYSTEM', 'SIMULATION')),
-    actor_id TEXT,                                    -- resident_id if USER
-    
-    -- Action
-    action TEXT NOT NULL,                             -- 'CREATE', 'UPDATE', 'DELETE', 'LOGIN', 'LOGOUT', etc.
-    entity_type TEXT NOT NULL,                        -- Table name
-    entity_id TEXT NOT NULL,
-    
-    -- Change details
-    old_values TEXT,                                  -- JSON of changed fields (before)
-    new_values TEXT,                                  -- JSON of changed fields (after)
-    
-    -- Context
-    session_id TEXT,
-    ip_address TEXT,
-    terminal_id TEXT
-);
+## Recovery behavior
 
-CREATE INDEX idx_audit_log_timestamp ON audit_log(timestamp);
-CREATE INDEX idx_audit_log_actor ON audit_log(actor_id);
-CREATE INDEX idx_audit_log_entity ON audit_log(entity_type, entity_id);
-```
+`AttemptRecovery(dbPath, backupDir)` runs once at startup, only when the database file already exists, in four phases (`internal/database/recovery.go`):
+
+1. **Integrity check** — opens the file read-only (`?mode=ro`) and runs `PRAGMA integrity_check`, expecting a single row equal to `"ok"`. Success returns `RecoverySuccess` immediately.
+2. **WAL recovery** — only attempted if a `-wal` sidecar file exists; opens the database normally, issues `PRAGMA wal_checkpoint(RESTART)`, then re-runs the integrity check. Success returns `RecoverySuccess` with `WALRecovered=true`.
+3. **Backup restoration** — lists `backupDir`, keeps files ending in `.db`, sorts newest-first by modification time, and tries each in turn: runs the same integrity check against the candidate backup, moves the corrupted live file aside to `<path>.corrupted.<timestamp>` (best-effort; a failure here is only logged), removes any `-wal`/`-shm` sidecars (errors ignored), and copies the backup over the live path. The loop stops at the first backup that passes its own integrity check — it does not confirm the backup's schema version or vault identity, only that SQLite itself considers the file uncorrupted. Success returns `RecoveryFromBackup`.
+4. **Failure** — if no phase above succeeds, returns `RecoveryFailed` with a generic `"all recovery attempts failed"` error; the per-phase detail is available on `RecoveryReport.Steps` but the CLI's caller does not inspect it (`cmd/vtuos/main.go`).
+   > ⚠ See [#16](https://github.com/jstephenperry/vt-uos/issues/16) and [#17](https://github.com/jstephenperry/vt-uos/issues/17).
+
+The file copy in phase 3 (`copyFile`, `internal/database/recovery.go`) explicitly calls `dstFile.Sync()` after `io.Copy` before returning, so a restored backup is fsynced to disk.
+
+`DiagnoseDatabase(dbPath)` is a separate, read-only helper (not part of the `AttemptRecovery` flow) that reports file existence/size/mtime/permissions, WAL/SHM sidecar presence, and — if the file opens — SQLite version, schema version, user version, journal mode, page size/count, freelist count, and a `PRAGMA quick_check` result (`internal/database/recovery.go`).
+
+## Snapshot mechanism
+
+`Engine.CreateSnapshot(ctx)` (`internal/simulation/snapshot.go`) first calls `saveState` to flush the current vault clock and birth/death/tick counters into `vault_metadata` (warning-only if that fails), then calls `db.Backup(ctx)`. `Backup` (`internal/database/database.go`) checkpoints the WAL first (`PRAGMA wal_checkpoint(TRUNCATE)`, best-effort — a failure here only logs a warning), then runs `VACUUM INTO '<timestamped-path>'` against a filename built as `vault-<YYYYMMDD-HHMMSS>.db` under the configured backup directory. The backup path is interpolated into the SQL string with `fmt.Sprintf` rather than passed as a bound parameter; it is server-generated from a timestamp today, not user input. If `BackupRetentionDays > 0`, `Backup` spawns an untracked `go db.cleanOldBackups()` goroutine that deletes backup files older than the retention window — with no mechanism to wait for it or cap concurrent instances if backups run in quick succession.
+
+A snapshot file produced this way is restored via the `-restore <path>` flag (`cmd/vtuos/main.go`), which copies it over the live database path (removing any `-wal`/`-shm` sidecars first) before `AttemptRecovery`, `database.Open`, or migrations run — an invalid or wrong-schema snapshot is not validated before installation; the subsequent integrity check and migration step are the only safety net.
+
+> ⚠ See [#38](https://github.com/jstephenperry/vt-uos/issues/38).
+
+## Data directory / default path
+
+`database.path` defaults to `vault.db` (`internal/config/config.go`). `config.EnsureDataDir` resolves this at startup (`internal/config/loader.go`): an absolute path is used as-is (creating its parent directory); a relative path is placed under `$XDG_DATA_HOME/vtuos/` if set, else `~/.local/share/vtuos/`, and if `MkdirAll` on that directory fails, the function silently falls back to the bare relative path in the current working directory with no logged warning. `config.BackupDir` resolves the backup directory the same way but as a `backups` subdirectory next to the database (or `$XDG_DATA_HOME/vtuos/backups`, or a bare `backups` directory as a last resort), always calling `MkdirAll` and returning a hard error if that fails — unlike `EnsureDataDir`'s silent fallback (`internal/config/loader.go`).
+
+## Seed data shape
+
+`seed.Generator.Generate` (`internal/database/seed/generator.go`) runs entirely inside one `*sql.Tx`, seeding tables in this order, all via parameterized (`?`) inserts:
+
+1. **`quarters`** — one row per unit across `QuartersSectors` (`A`,`B`,`C`,`D`) × `QuartersLevels` (5) × a fixed per-level mix of 5×`SINGLE` (capacity 1), 8×`DOUBLE` (capacity 2), 8×`FAMILY` (capacity 5), 2×`EXECUTIVE` (capacity 3), 2×`DORMITORY` (capacity 12) — 25 units per level, 500 quarters total for the default 4-sector/5-level configuration (`internal/database/seed/generator.go`, `internal/database/seed/names.go`).
+2. **`vocations`** — one row per entry in `DepartmentVocations`: 36 vocations across 8 departments (`ENGINEERING` 6, `MEDICAL` 6, `SECURITY` 4, `FOOD_PRODUCTION` 5, `ADMINISTRATION` 5, `EDUCATION` 4, `SANITATION` 3, `RESEARCH` 3), each with `headcount_authorized`/`headcount_minimum` of 10/3 (5/2 for `ADMINISTRATION`, 1/1 for the single `ADM-OVSR-01` Overseer vocation) (`internal/database/seed/generator.go`, `internal/database/seed/names.go`).
+3. **`households` + `residents`** — family households (default config target: 100) each insert one `households` row plus 2 adult `residents` rows and 0–4 child `residents` rows (uniformly random), followed by single-person households (default target: 80) each inserting one `households` row and one `residents` row, followed by additional single-person households generated one at a time until the resident count reaches `TargetPopulation` (default 500) (`internal/database/seed/generator.go`). `DefaultConfig` sets `RandomSeed: 2077`, so a given target/household configuration produces the same population deterministically (`internal/database/seed/generator.go`).
+4. **`resource_categories`** — 8 rows (`FOOD`, `WATER`, `MEDICAL`, `POWER`, `PARTS`, `CLOTHING`, `TOOLS`, `CHEMICALS`) (`internal/database/seed/names.go`).
+5. **`resource_items`** — 28 rows across those categories, each also generating exactly one **`resource_stocks`** row (lot `LOT-<item_code>-2077`) with an initial quantity derived from `TargetPopulation` — 90 days of food at 0.5 kg/person/day, 30 days of water at 3 L/person/day, 2 units/person for medical, 0.5 units/person for everything else (`internal/database/seed/generator.go`, `internal/database/seed/names.go`).
+
+`main.runSeed` (`cmd/vtuos/main.go`) runs the generator only if `SELECT COUNT(*) FROM residents` succeeds and returns 0; if that query itself errors (e.g. the table doesn't exist), the error is ignored and seeding proceeds anyway rather than surfacing the underlying schema problem.
